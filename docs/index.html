@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>career-copilot — worklist</title>
+<style>
+/* ── tokens ───────────────────────────────────────────────────────────── */
+:root{
+  --bg:#fbfbfa; --surface:#fff; --sunk:#f4f4f2; --line:#e3e3df; --line-strong:#c9c9c3;
+  --ink:#1a1a18; --ink-2:#55554e; --ink-3:#7a7a72;
+  --accent:#1c5d4a; --accent-soft:#e6f0ec; --accent-line:#9dc2b4;
+  --warn:#8a5a10; --warn-soft:#fbf1de; --warn-line:#dfb877;
+  --stop:#8f2e21; --stop-soft:#fbeae7; --stop-line:#dda69c;
+  --radius:7px; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);
+  font-feature-settings:"kern" 1}
+h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.011em}
+a{color:var(--accent)}
+button{font:inherit;color:inherit}
+:focus-visible{outline:2.5px solid var(--accent);outline-offset:2px;border-radius:3px}
+.sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0 0 0 0);white-space:nowrap;border:0}
+
+/* ── shell ────────────────────────────────────────────────────────────── */
+.wrap{max-width:1100px;margin:0 auto;padding:0 28px 96px}
+header{border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:20}
+.head{max-width:1100px;margin:0 auto;padding:14px 28px;display:flex;align-items:baseline;gap:20px}
+.brand{font-size:14.5px;font-weight:650}
+.brand span{color:var(--ink-3);font-weight:450}
+nav{margin-left:auto;display:flex;gap:2px}
+nav button{background:none;border:0;padding:7px 13px;border-radius:var(--radius);
+  color:var(--ink-2);cursor:pointer;font-size:14px}
+nav button:hover{background:var(--sunk)}
+nav button[aria-current="page"]{background:var(--ink);color:#fff;font-weight:550}
+
+/* ── the quiet morning ────────────────────────────────────────────────── */
+.today{padding:38px 0 8px}
+.eyebrow{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);
+  font-weight:600;margin-bottom:14px}
+.zero{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:34px 32px}
+.zero-n{font-size:60px;line-height:.95;font-weight:680;letter-spacing:-.035em;margin-bottom:6px}
+.zero-lead{font-size:17.5px;font-weight:550;margin-bottom:8px}
+.zero-body{color:var(--ink-2);max-width:60ch;font-size:14.5px}
+.zero-body b{color:var(--ink);font-weight:600}
+.run{margin-top:20px;padding-top:16px;border-top:1px solid var(--line);
+  display:flex;gap:26px;flex-wrap:wrap;font-size:13px;color:var(--ink-3)}
+.run b{display:block;color:var(--ink);font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
+
+/* ── rows ─────────────────────────────────────────────────────────────── */
+.section-head{display:flex;align-items:center;gap:12px;margin:34px 0 12px}
+.section-head h2{font-size:16px}
+.count{font-size:13px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+.tools{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap}
+.chip{background:var(--surface);border:1px solid var(--line);border-radius:999px;
+  padding:5px 12px;font-size:12.5px;color:var(--ink-2);cursor:pointer}
+.chip:hover{border-color:var(--line-strong)}
+.chip[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:#fff;font-weight:550}
+
+.list{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--surface)}
+.row{border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}
+.row-main{display:flex;align-items:flex-start;gap:14px;padding:13px 16px;width:100%;
+  background:none;border:0;text-align:left;cursor:pointer}
+.row-main:hover{background:var(--sunk)}
+.row-t{flex:1;min-width:0}
+.row-title{font-weight:600;font-size:14.5px}
+.row-meta{color:var(--ink-3);font-size:12.5px;margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row-when{font-size:12px;color:var(--ink-3);font-variant-numeric:tabular-nums;
+  flex-shrink:0;padding-top:2px}
+.caret{flex-shrink:0;color:var(--ink-3);transition:transform .12s;font-size:11px;padding-top:3px}
+.row[data-open="1"] .caret{transform:rotate(90deg)}
+
+/* level badge: shape + word + colour, never colour alone */
+.lvl{display:inline-flex;align-items:center;gap:5px;border-radius:5px;padding:2px 7px;
+  font-size:11.5px;font-weight:600;border:1px solid;white-space:nowrap}
+.lvl-entry{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+.lvl-intern{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+.lvl-unknown{background:var(--warn-soft);border-color:var(--warn-line);color:var(--warn)}
+.lvl::before{content:"●";font-size:8px}
+.lvl-unknown::before{content:"▲"}
+
+.detail{padding:0 16px 18px 44px;display:none}
+.row[data-open="1"] .detail{display:block}
+.why{background:var(--sunk);border-left:3px solid var(--line-strong);padding:10px 13px;
+  border-radius:0 6px 6px 0;font-size:13px;color:var(--ink-2);margin-bottom:12px}
+.why b{color:var(--ink)}
+.desc{font-size:13.5px;color:var(--ink-2);max-width:78ch;white-space:pre-wrap}
+.actions{margin-top:14px;display:flex;gap:8px;align-items:center}
+.btn{background:var(--ink);color:#fff;border:1px solid var(--ink);border-radius:var(--radius);
+  padding:8px 15px;font-size:13.5px;font-weight:550;cursor:pointer;text-decoration:none;
+  display:inline-block;min-height:36px;line-height:20px}
+.btn:hover{background:#000}
+.btn-2{background:var(--surface);color:var(--ink);border-color:var(--line-strong)}
+.btn-2:hover{background:var(--sunk)}
+.note{font-size:12.5px;color:var(--ink-3)}
+
+.more{width:100%;background:var(--sunk);border:1px dashed var(--line-strong);
+  border-radius:10px;padding:15px;margin-top:14px;color:var(--ink-2);cursor:pointer;
+  font-size:13.5px;text-align:left}
+.more:hover{background:#eeeeea}
+.more b{color:var(--ink)}
+
+/* ── evidence ledger ──────────────────────────────────────────────────── */
+.lede{max-width:66ch;color:var(--ink-2);font-size:14.5px;margin:6px 0 26px}
+.funnel{background:var(--surface);border:1px solid var(--line);border-radius:12px;
+  padding:24px;margin-bottom:12px}
+.fnum{display:flex;gap:40px;flex-wrap:wrap;align-items:flex-end}
+.fnum div{min-width:120px}
+.fnum b{display:block;font-size:34px;font-weight:680;letter-spacing:-.03em;
+  font-variant-numeric:tabular-nums;line-height:1.05}
+.fnum span{font-size:12.5px;color:var(--ink-3)}
+.caveat{margin-top:18px;padding-top:16px;border-top:1px solid var(--line);
+  font-size:13px;color:var(--ink-2);max-width:74ch}
+.caveat b{color:var(--ink)}
+
+.gate{background:var(--surface);border:1px solid var(--line);border-radius:10px;margin-bottom:9px}
+.gate-h{display:flex;align-items:baseline;gap:13px;padding:14px 16px;width:100%;
+  background:none;border:0;text-align:left;cursor:pointer}
+.gate-h:hover{background:var(--sunk)}
+.gate-name{font-weight:600;font-size:14.5px}
+.gate-n{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--ink-2);font-size:13.5px}
+.gate-body{padding:0 16px 18px;display:none}
+.gate[data-open="1"] .gate-body{display:block}
+.quote{border-left:3px solid var(--stop-line);background:var(--stop-soft);
+  padding:9px 12px;border-radius:0 6px 6px 0;margin:9px 0;
+  font-family:var(--mono);font-size:12px;line-height:1.55;color:#4a2b25;
+  white-space:pre-wrap;word-break:break-word}
+.noquote{border-left:3px solid var(--line-strong);background:var(--sunk);
+  padding:9px 12px;border-radius:0 6px 6px 0;margin:9px 0;font-size:12.5px;color:var(--ink-2)}
+.ex-title{font-size:13px;font-weight:600;margin-top:14px}
+.ex-co{font-size:12.5px;color:var(--ink-3)}
+.flag{background:none;border:1px solid var(--line-strong);border-radius:5px;
+  padding:3px 9px;font-size:11.5px;color:var(--ink-2);cursor:pointer;margin-top:5px}
+.flag[aria-pressed="true"]{background:var(--warn-soft);border-color:var(--warn-line);
+  color:var(--warn);font-weight:600}
+footer{max-width:1100px;margin:40px auto 0;padding:22px 28px;border-top:1px solid var(--line);
+  color:var(--ink-3);font-size:12.5px}
+@media (max-width:720px){
+  .wrap,.head{padding-left:16px;padding-right:16px}
+  .detail{padding-left:16px}
+  .zero-n{font-size:46px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="head">
+    <div class="brand">career&#8209;copilot <span>· worklist</span></div>
+    <nav aria-label="Views">
+      <button id="nav-today" aria-current="page">Today</button>
+      <button id="nav-evidence">Why things were dropped</button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section id="view-today"></section>
+  <section id="view-evidence" hidden></section>
+</main>
+
+<footer>
+  <b>Public demo.</b> Real roles and real counts from a live run; job-description text is deliberately omitted rather than republished, so role detail panes show only the level reasoning. Short quotes in the evidence view are excerpts shown to explain a filtering decision.<br><br>
+  Roles come straight from company applicant-tracking systems — Greenhouse, Ashby, Lever,
+  Workable, Workday. Nothing here applies, submits, or fills anything on your behalf.
+  There is deliberately no match percentage.
+</footer>
+
+<script>
+const DATA = {"generatedAt":"2026-07-30T18:41:49.528021+00:00","funnel":{"fetched":25294,"kept":880,"excluded":24414,"gateCountTotal":43602,"needsLevelCheck":652,"gates":{"not_a_software_role":22074,"wrong_seniority_band":14320,"citizenship_or_itar_restricted":3355,"security_clearance_required":2707,"employer_will_not_sponsor":1146}},"worklist":[{"id":"f07e7ce0a0963e16","title":"Software Engineer, RCM Billing","company":"Commure","location":"Mountain View, CA","url":"https://jobs.ashbyhq.com/Commure/727c0ce9-7d3b-43fe-8d00-05255f094db5","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-29T23:44:11.751000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false},{"id":"cdb7eae570813777","title":"Embedded Software Engineer Intern - Fall 2026","company":"Redwood Materials","location":"San Francisco, California, United States","url":"https://boards.greenhouse.io/redwoodmaterials/jobs/6126784004?gh_jid=6126784004","ats":"greenhouse","level":"intern","levelSource":"title","levelWhy":"the title carries a intern marker","postedAt":"2026-07-29T16:29:01-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"bb30b7865d9677df","title":"Avionics Test Systems Engineer, Ground Systems","company":"Relativity Space","location":"Long Beach, California","url":"https://boards.greenhouse.io/relativity/jobs/8653031002?gh_jid=8653031002","ats":"greenhouse","level":"entry","levelSource":"years","levelWhy":"the description asks for 1+ year","postedAt":"2026-07-29T12:24:05-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"35f5333accf1e76c","title":"Junior Software Engineer - Cloud Platform","company":"loveholidays","location":"London","url":"https://jobs.ashbyhq.com/loveholidays/760a6144-5bff-49f1-907c-71a87aa08755","ats":"ashby","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-29T13:52:26.978000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false},{"id":"8ff76a8d057d8f2e","title":"iOS Developer","company":"elevenlabs","location":"London","url":"https://jobs.ashbyhq.com/elevenlabs/3b46a40a-e51d-47d3-b623-75a4d03a05b4","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-29T10:18:19.889000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false},{"id":"83c17877ee81ebd6","title":"Android Engineer","company":"elevenlabs","location":"London","url":"https://jobs.ashbyhq.com/elevenlabs/b05d28ca-bd69-4a3e-ba47-3fa12aa0ef8d","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-29T09:46:40.807000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false},{"id":"c8d1ffcd8e1b99ed","title":"Associate Developer I","company":"tevora","location":"Irvine, CA","url":"https://jobs.lever.co/tevora/e6dea5d8-d882-448f-80cd-e0f4a3b0589d","ats":"lever","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-29T04:38:53.693000+00:00","remote":null,"employmentType":"Temporary FT","descAvailable":false},{"id":"ff49e367b7415865","title":"Junior Software Engineer (AI-Forward)","company":"Texas Sports Academy Main","location":"Austin","url":"https://apply.workable.com/j/2132C3AB96/apply","ats":"workable","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-29T00:00:00+00:00","remote":null,"employmentType":"","descAvailable":false},{"id":"fe3af2e67456cc70","title":"Software Engineer - Database Engineering","company":"snowflake","location":"US-CA-Menlo Park","url":"https://jobs.ashbyhq.com/snowflake/db1375f0-ea5d-404a-b640-259f94dbc995","ats":"ashby","level":"entry","levelSource":"years","levelWhy":"the description asks for 2+ years","postedAt":"2026-07-28T22:20:47.028000+00:00","remote":null,"employmentType":"FullTime","descAvailable":false},{"id":"16b258a7ca9944ec","title":"Software Engineer I, Storage","company":"Crusoe","location":"San Francisco, CA - US","url":"https://jobs.ashbyhq.com/Crusoe/4f5d34ed-0c05-4eec-b8f8-14663e114b02","ats":"ashby","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-28T17:16:20.211000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false},{"id":"8a361719e21dfbe2","title":"Intermediate Frontend Engineer","company":"hiive","location":"Vancouver, BC (HQ)","url":"https://jobs.ashbyhq.com/hiive/4c41cb82-009e-42c7-afb2-17d2cff4bdf0","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-28T16:40:53.419000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false},{"id":"ebecb1e3e61cd074","title":"Software Engineer, Mobile (iOS & Android)","company":"abby-care","location":"San Francisco","url":"https://jobs.ashbyhq.com/abby-care/ef358884-cf42-4f24-8bb0-1f93b4b117db","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-28T15:31:33.179000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false},{"id":"eef8d2c808fac298","title":"Software Engineer, Robotics Data ","company":"mercor","location":"San Francisco","url":"https://jobs.ashbyhq.com/mercor/a217f1a6-c63c-4dfb-81c3-ecc0c5d44f98","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-28T15:08:02.195000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false},{"id":"3b67712f336dea90","title":"Fullstack Engineer - Subscriptions","company":"spotify","location":"London","url":"https://jobs.lever.co/spotify/1e8c984e-fa8e-4dbb-8f74-6f608ae3bfa1","ats":"lever","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-28T14:32:49.417000+00:00","remote":true,"employmentType":"Permanent","descAvailable":false},{"id":"e65a6088834539c3","title":"Software Engineer, New Grad 2026","company":"color-health","location":"South San Francisco, California","url":"https://jobs.ashbyhq.com/color-health/41fa6f16-b2f2-46c6-bdb4-9aae3b9b5b96","ats":"ashby","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-28T00:23:24.906000+00:00","remote":null,"employmentType":"FullTime","descAvailable":false},{"id":"c681a9e121afc2b1","title":"Intermediate Software Engineer","company":"hiive","location":"Vancouver, BC (HQ)","url":"https://jobs.ashbyhq.com/hiive/3273d623-2347-4bf6-b659-06068aa56339","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-27T19:42:34.296000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false},{"id":"45cf06d6ffc7aaa8","title":"Software Engineer I","company":"The Trade Desk","location":"Bellevue","url":"https://job-boards.greenhouse.io/thetradedesk/jobs/5196864007","ats":"greenhouse","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-27T14:55:23-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"793cea231c38d82b","title":"Software Engineer - Computer Vision","company":"Verkada","location":"San Mateo, CA United States","url":"https://job-boards.greenhouse.io/verkada/jobs/5195995007","ats":"greenhouse","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-27T13:40:21-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"e56b9e09afd9cff3","title":"Software Engineer (Entry)","company":"Pattern Data","location":"Richmond, VA","url":"https://job-boards.greenhouse.io/patterndata/jobs/5196699007","ats":"greenhouse","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-27T12:37:32-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"89a88be5eb52be78","title":"Software Developer & Operations Coordinator","company":"getwingapp","location":"Philippines","url":"https://jobs.lever.co/getwingapp/60e8a6bd-f5e7-4dd6-beef-830c1c7be821","ats":"lever","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-27T14:58:05.314000+00:00","remote":true,"employmentType":"Full Time","descAvailable":false},{"id":"d6870b62c6178d89","title":"AI Inference Core - Junior SDET, Release Integration Testing","company":"cerebras","location":"US and Canada Offices","url":"https://jobs.ashbyhq.com/cerebras/08ffd14b-cb60-4916-9946-735e49594308","ats":"ashby","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-27T14:16:29.480000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false},{"id":"caabac35eb985a55","title":"Software Engineer I","company":"runsybil-jobs","location":"New York City","url":"https://jobs.ashbyhq.com/runsybil-jobs/fd733ce7-7892-4019-9f6d-b6a75ba2aa59","ats":"ashby","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-27T14:10:52.293000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false},{"id":"d25dffbde7618bc4","title":"Software Engineer","company":"retell-ai","location":"San Francisco Bay Area","url":"https://jobs.ashbyhq.com/retell-ai/538ecfa9-2315-42a6-89cc-3cae52165526","ats":"ashby","level":"entry","levelSource":"years","levelWhy":"the description asks for 0+ years","postedAt":"2026-07-26T18:47:26.965000+00:00","remote":null,"employmentType":"FullTime","descAvailable":false},{"id":"e552e9dc386d865e","title":"Software Engineer, VCU (Vehicle Control Unit)","company":"Bot Auto","location":"Houston, TX","url":"https://job-boards.greenhouse.io/botauto/jobs/5370716008","ats":"greenhouse","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-24T21:48:42-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"066d0df8299dd48a","title":"Software Engineer, Fleet Simulation (Core Data Science)","company":"zoox","location":"Foster City, CA","url":"https://jobs.lever.co/zoox/18b6dfa0-d581-4d29-ac79-5d6e666aa9c3","ats":"lever","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-24T22:20:20.891000+00:00","remote":null,"employmentType":"Full-time","descAvailable":false},{"id":"5106c4e88d1ec851","title":"Software Engineer in Test - Associate ","company":"iCapital","location":"Salt Lake City, Utah, United States","url":"https://job-boards.greenhouse.io/icapitalnetwork/jobs/8631890002","ats":"greenhouse","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-24T16:26:52-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"7de72010f0213f2c","title":"Frontend Engineer - Access Control","company":"Verkada","location":"San Mateo, CA United States","url":"https://job-boards.greenhouse.io/verkada/jobs/5195281007","ats":"greenhouse","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-24T16:24:35-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"5444d97b0924ef66","title":"Software Engineer","company":"kitware","location":"Clifton Park, New York","url":"https://jobs.lever.co/kitware/1d458d7b-da76-4323-84cf-9708020b9ca2","ats":"lever","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-24T20:07:24.935000+00:00","remote":null,"employmentType":"Full Time","descAvailable":false},{"id":"e80d99a6266077f8","title":"Software Engineer 1 - DSP Runtime","company":"nexxen","location":"New York, NY","url":"https://jobs.ashbyhq.com/nexxen/53cbef54-13b1-4539-9a18-bdd0c3431d32","ats":"ashby","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-24T20:04:01.009000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false},{"id":"e85bdde15b8c242b","title":"Software Engineer- Postgres","company":"snowflake","location":"US-CA-Menlo Park","url":"https://jobs.ashbyhq.com/snowflake/494fcbd0-1cf3-4248-b5cf-b35d982ced00","ats":"ashby","level":"entry","levelSource":"years","levelWhy":"the description asks for 2+ years","postedAt":"2026-07-24T19:59:32.556000+00:00","remote":null,"employmentType":"FullTime","descAvailable":false},{"id":"06a0b4d5f2b01b16","title":"Quantitative Developer Intern","company":" BlackEdge Capital","location":"Chicago","url":"https://job-boards.greenhouse.io/blackedgecapital/jobs/4703821005","ats":"greenhouse","level":"intern","levelSource":"title","levelWhy":"the title carries a intern marker","postedAt":"2026-07-24T14:56:42-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"80f9f1053f773129","title":"Graduate Quantitative Developer","company":" BlackEdge Capital","location":"Chicago","url":"https://job-boards.greenhouse.io/blackedgecapital/jobs/4703827005","ats":"greenhouse","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-24T14:55:37-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"fa8145da64019ecb","title":"Embedded Systems Engineer, Recent Graduate","company":"blissway","location":"Denver, Colorado","url":"https://jobs.ashbyhq.com/blissway/51d6d839-9801-4436-bfc2-918bae428ed8","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-24T18:51:46.999000+00:00","remote":null,"employmentType":"FullTime","descAvailable":false},{"id":"22d283a3294a03cc","title":"Backend Engineer - Connectivity","company":"Verkada","location":"San Mateo, CA United States","url":"https://job-boards.greenhouse.io/verkada/jobs/5194598007","ats":"greenhouse","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-24T13:18:48-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"7c316651c02c029a","title":"SQL Software Developer 736","company":"Freedom Technology Solutions Group","location":"Annapolis Junction, MD","url":"https://job-boards.greenhouse.io/freedomconsulting/jobs/5195762007","ats":"greenhouse","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-24T13:07:09-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"13dcfd4d5fe67713","title":"Software Engineer - Frontend Development","company":"PlayStation Global","location":"Ireland, Dublin","url":"https://job-boards.greenhouse.io/sonyinteractiveentertainmentglobal/jobs/6122466004","ats":"greenhouse","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-24T12:47:34-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"e18f2522cb831cd9","title":"Junior Embedded Software Engineer","company":"observable-space","location":"Los Angeles, CA","url":"https://jobs.ashbyhq.com/observable-space/97e8073f-a23e-4360-ba9c-a3869ad58ab1","ats":"ashby","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-24T13:10:59.355000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false},{"id":"600fceab242fd373","title":"Scientific Software Engineer - Developer Experience","company":"QuEra Computing, Inc.","location":"Boston, MA, USA","url":"https://job-boards.greenhouse.io/queracomputinginc/jobs/5369462008","ats":"greenhouse","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-23T22:10:01-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"810aa6159912991f","title":"Software Engineer","company":"Catapult Sports","location":"Melbourne, Australia","url":"https://job-boards.greenhouse.io/catapultsports/jobs/8080911","ats":"greenhouse","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-23T20:37:17-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"d84c10d25a2b18d1","title":"Associate Scientific Software Engineer","company":"Oxford Quantum Circuits","location":"Reading","url":"https://apply.workable.com/j/FFA221764E/apply","ats":"workable","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-24T00:00:00+00:00","remote":null,"employmentType":"","descAvailable":false},{"id":"318df0cb948e4b01","title":"Embedded Software Engineer, Access Control","company":"Verkada","location":"San Mateo, CA United States","url":"https://job-boards.greenhouse.io/verkada/jobs/5194716007","ats":"greenhouse","level":"entry","levelSource":"years","levelWhy":"the description asks for 1+ year","postedAt":"2026-07-23T19:42:32-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"938e457324bbba8b","title":"UI Frontend Engineer - Associate","company":"iCapital","location":"New York, New York, United States","url":"https://job-boards.greenhouse.io/icapitalnetwork/jobs/8645574002","ats":"greenhouse","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-23T18:10:35-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"2fc310e7d53cfae4","title":"Software Engineer, Handshake AI ","company":"handshake","location":"San Francisco, CA","url":"https://jobs.ashbyhq.com/handshake/9a93ec72-d396-4971-8d4c-222094f9c5a3","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-23T21:29:27.664000+00:00","remote":null,"employmentType":"FullTime","descAvailable":false},{"id":"7cd240dab54e2da2","title":"Quant Developer / Quant Research Intern - 2026/2027","company":"anthelioncap","location":"New York City","url":"https://jobs.ashbyhq.com/anthelioncap/5e2ea37b-2369-474e-b717-c24c60976e96","ats":"ashby","level":"intern","levelSource":"title","levelWhy":"the title carries a intern marker","postedAt":"2026-07-23T19:51:59.097000+00:00","remote":false,"employmentType":"Intern","descAvailable":false},{"id":"5108a64643b7e470","title":"Quant Developer \u2014 Full-time","company":"anthelioncap","location":"New York City","url":"https://jobs.ashbyhq.com/anthelioncap/b6f6487c-384d-422c-8446-9cd06b068b38","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-23T19:51:21.585000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false},{"id":"c17035d74198c454","title":"Mid-Level Full Stack Developer","company":"synergyecp","location":"Suitland, MD","url":"https://jobs.lever.co/synergyecp/31d5c998-18cd-46bf-9e3a-037d58906dfe","ats":"lever","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-23T18:56:19.666000+00:00","remote":null,"employmentType":"Full Time","descAvailable":false},{"id":"8a5e99d34622115a","title":"Mobile Engineer","company":"ando","location":"San Francisco","url":"https://jobs.ashbyhq.com/ando/3b23fc33-9e45-4213-959b-d313e418e6d0","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-23T18:20:37.424000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false},{"id":"132f35d8e577ec41","title":"Software Engineer - SnowCommand","company":"snowflake","location":"PL-Warsaw-Lixa C","url":"https://jobs.ashbyhq.com/snowflake/49aa16eb-c429-4e80-9b80-bd5c6cd12721","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-23T14:15:04.270000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false},{"id":"b8f755bbe300ca96","title":"Python Developer - Associate","company":"iCapital","location":"IN - Jaipur","url":"https://job-boards.greenhouse.io/icapitalnetwork/jobs/8646951002","ats":"greenhouse","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-23T09:06:28-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"54f1009c869fc124","title":"Forward Deployed Software Engineer - NATO","company":"palantir","location":"London, United Kingdom","url":"https://jobs.lever.co/palantir/73d1a90c-162d-4cb6-9e0c-4c8de9561ad0","ats":"lever","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-23T12:53:46.989000+00:00","remote":null,"employmentType":"Full-time","descAvailable":false},{"id":"01816e78d9d08e3e","title":"Software Engineer, Cluster Deployment  ","company":"cerebras","location":"Headquarters/Sunnyvale Office","url":"https://jobs.ashbyhq.com/cerebras/63b9c135-ce5d-4898-8e4d-9422d39e4ca6","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-23T10:34:15.819000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false},{"id":"1fd5843193888331","title":"Intermediate Software Developer - SAD con","company":"Valsoft Corporation","location":"Beirut","url":"https://apply.workable.com/j/FB680A602A/apply","ats":"workable","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-23T00:00:00+00:00","remote":null,"employmentType":"","descAvailable":false},{"id":"6a15574321ef2486","title":"Software Engineer - Edge AI Systems","company":"palantir","location":"Seattle, WA","url":"https://jobs.lever.co/palantir/67110929-adea-41c3-851a-8882e222d9e4","ats":"lever","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-22T22:12:20.264000+00:00","remote":null,"employmentType":"Full-time","descAvailable":false},{"id":"498e2e9d7ac91f40","title":"Software Engineer - Platform & Application","company":"bosonai","location":"Santa Clara HQ","url":"https://jobs.lever.co/bosonai/2b520a0f-556a-4dc2-a5a7-d8845a921335","ats":"lever","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-22T21:46:58.632000+00:00","remote":null,"employmentType":"Full-time","descAvailable":false},{"id":"5050da6eb896f747","title":"Systems Engineer, Energy Storage","company":"Redwood Materials","location":"San Francisco, California, United States","url":"https://boards.greenhouse.io/redwoodmaterials/jobs/6007517004?gh_jid=6007517004","ats":"greenhouse","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-22T17:10:38-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"217a205390d305b9","title":"Software Engineer I","company":"checkout.com","location":"Paris","url":"https://jobs.ashbyhq.com/checkout.com/c0f1a326-2924-4a6f-b649-0ed05cccab8e","ats":"ashby","level":"entry","levelSource":"title","levelWhy":"the title carries a entry marker","postedAt":"2026-07-22T12:13:27.398000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false},{"id":"f672216c4631d046","title":"Assoc Software Developer - CAN","company":"gen-digital","location":"CZE - Prague","url":"https://jobs.ashbyhq.com/gen-digital/0226a0c1-9f2f-4ea7-ad3f-b62f652b370e","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-22T12:04:29.310000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false},{"id":"8a650b0fd0050ea8","title":"Software Engineer - Java","company":"Celonis","location":"Bangalore, India","url":"https://job-boards.greenhouse.io/celonis/jobs/7791275003?gh_jid=7791275003","ats":"greenhouse","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-22T03:10:12-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"39a51fbac1db4396","title":"ML Infrastructure Engineer","company":"SpaceXAI","location":"Palo Alto, California, United States","url":"https://job-boards.greenhouse.io/xai/jobs/5193037007","ats":"greenhouse","level":"entry","levelSource":"years","levelWhy":"the description asks for 2+ years","postedAt":"2026-07-21T23:49:23-04:00","remote":null,"employmentType":"","descAvailable":false},{"id":"8c5d6bd22467e58a","title":"Software Engineer","company":"gradientrobotics","location":"San Francisco","url":"https://jobs.ashbyhq.com/gradientrobotics/7c995dbf-5434-46e8-81b4-d845734029b6","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-22T00:43:41.026000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false}],"worklistTotal":880,"levels":{"unknown":652,"intern":45,"entry":183},"levelSources":{"none":652,"title":149,"years":79},"sources":{"ashby":321,"greenhouse":338,"lever":197,"workable":24},"companies":234,"newSinceYesterday":[],"excludedSamples":{"not_a_software_role":[{"id":"6b7fb47f2ec4b64a","title":"Talent Management","company":"notion","location":"San Francisco, California","url":"https://jobs.ashbyhq.com/notion/a67088f2-4432-4ec6-b747-c5e47720a718","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-30T02:18:48.447000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false,"reason":"not a software engineering role: 'Talent Management'"},{"id":"56a246c6b7875ca3","title":"Senior Product Marketing Manager Interoperable Lakehouse","company":"snowflake","location":"US-CA-Menlo Park","url":"https://jobs.ashbyhq.com/snowflake/83614d9d-daa6-4a1e-b18e-b02ef6c5a84c","ats":"ashby","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-30T01:01:56.405000+00:00","remote":null,"employmentType":"FullTime","descAvailable":false,"reason":"not a software engineering role: 'Senior Product Marketing Manager Interoperable Lakehouse'"},{"id":"0bc1e53893c19b95","title":"Electrical Engineering Technician - RF","company":"saronic","location":"Austin, TX","url":"https://jobs.ashbyhq.com/saronic/38dc2972-7b57-4f65-a1d4-f6e3ce105ee3","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-30T00:59:49.266000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"not a software engineering role: 'Electrical Engineering Technician - RF'"},{"id":"a648ff16337a0709","title":"Electrical Engineer \u2013 UUVs & Undersea Electronics","company":"saronic","location":"Austin, TX","url":"https://jobs.ashbyhq.com/saronic/05c92ce4-4c7f-4bc8-a9ac-5675e76e4479","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-30T00:57:54.155000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"not a software engineering role: 'Electrical Engineer \u2013 UUVs & Undersea Electronics'"},{"id":"2a3d48257903af9d","title":"IT Support/Operations Engineer","company":"baseten","location":"New York","url":"https://jobs.ashbyhq.com/baseten/c07eb44f-b5fa-4808-90b7-03b265d97836","ats":"ashby","level":"mid","levelSource":"years","levelWhy":"the description asks for 4+ years","postedAt":"2026-07-30T00:50:21.262000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false,"reason":"not a software engineering role: 'IT Support/Operations Engineer'"},{"id":"e487da8f2b282d7a","title":"Senior Engineering Manager","company":"archy","location":"United States","url":"https://jobs.ashbyhq.com/archy/4e6c9099-221d-449d-8158-3db7ab00b802","ats":"ashby","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T23:45:22.910000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false,"reason":"not a software engineering role: 'Senior Engineering Manager'"},{"id":"1e5a3ffa4dafbeba","title":"Global Investigator","company":"trm-labs","location":"North America","url":"https://jobs.ashbyhq.com/trm-labs/50780c03-a09e-4bcf-9869-2e6606e70636","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-29T23:37:27.658000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false,"reason":"not a software engineering role: 'Global Investigator'"},{"id":"4119c9604b6b6a7c","title":"Senior MDAO Engineer","company":"mach","location":"Huntington Beach, CA","url":"https://jobs.ashbyhq.com/mach/292d7737-b723-4c77-9fb2-f570c13f3269","ats":"ashby","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T23:32:39.665000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"not a software engineering role: 'Senior MDAO Engineer'"}],"wrong_seniority_band":[{"id":"f189124fd059f045","title":"Enterprise Software Engineer","company":"Antares","location":"Los Angeles","url":"https://jobs.ashbyhq.com/Antares/f4d323da-c799-40d6-85b7-92e0802e74e6","ats":"ashby","level":"mid","levelSource":"years","levelWhy":"the description asks for 3+ years","postedAt":"2026-07-30T02:09:48.366000+00:00","remote":null,"employmentType":"FullTime","descAvailable":false,"reason":"seniority band is mid, not entry-level"},{"id":"56a246c6b7875ca3","title":"Senior Product Marketing Manager Interoperable Lakehouse","company":"snowflake","location":"US-CA-Menlo Park","url":"https://jobs.ashbyhq.com/snowflake/83614d9d-daa6-4a1e-b18e-b02ef6c5a84c","ats":"ashby","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-30T01:01:56.405000+00:00","remote":null,"employmentType":"FullTime","descAvailable":false,"reason":"seniority band is senior, not entry-level"},{"id":"2a3d48257903af9d","title":"IT Support/Operations Engineer","company":"baseten","location":"New York","url":"https://jobs.ashbyhq.com/baseten/c07eb44f-b5fa-4808-90b7-03b265d97836","ats":"ashby","level":"mid","levelSource":"years","levelWhy":"the description asks for 4+ years","postedAt":"2026-07-30T00:50:21.262000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false,"reason":"seniority band is mid, not entry-level"},{"id":"e487da8f2b282d7a","title":"Senior Engineering Manager","company":"archy","location":"United States","url":"https://jobs.ashbyhq.com/archy/4e6c9099-221d-449d-8158-3db7ab00b802","ats":"ashby","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T23:45:22.910000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false,"reason":"seniority band is senior, not entry-level"},{"id":"4119c9604b6b6a7c","title":"Senior MDAO Engineer","company":"mach","location":"Huntington Beach, CA","url":"https://jobs.ashbyhq.com/mach/292d7737-b723-4c77-9fb2-f570c13f3269","ats":"ashby","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T23:32:39.665000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"seniority band is senior, not entry-level"},{"id":"0f3c786b4c7d7fca","title":"Flight Test Engineering Lead","company":"Anduril Industries","location":"Sydney, New South Wales, Australia","url":"https://boards.greenhouse.io/andurilindustries/jobs/5198229007?gh_jid=5198229007","ats":"greenhouse","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T23:29:42-04:00","remote":null,"employmentType":"","descAvailable":false,"reason":"seniority band is senior, not entry-level"},{"id":"c28f2bab7c314a0a","title":"Senior Conceptual Design Engineer - Advanced Concepts","company":"mach","location":"Huntington Beach, CA","url":"https://jobs.ashbyhq.com/mach/a183e1f9-2e2e-41a5-ae7c-7bc651f85375","ats":"ashby","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T23:29:03.767000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"seniority band is senior, not entry-level"},{"id":"e07d6385545b0331","title":"Air Vehicle Design Engineer","company":"mach","location":"Huntington Beach, CA","url":"https://jobs.ashbyhq.com/mach/d2f070cb-0084-428a-b570-ccdda8af0016","ats":"ashby","level":"mid","levelSource":"years","levelWhy":"the description asks for 5+ years","postedAt":"2026-07-29T23:25:15.099000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"seniority band is mid, not entry-level"}],"citizenship_or_itar_restricted":[{"id":"f189124fd059f045","title":"Enterprise Software Engineer","company":"Antares","location":"Los Angeles","url":"https://jobs.ashbyhq.com/Antares/f4d323da-c799-40d6-85b7-92e0802e74e6","ats":"ashby","level":"mid","levelSource":"years","levelWhy":"the description asks for 3+ years","postedAt":"2026-07-30T02:09:48.366000+00:00","remote":null,"employmentType":"FullTime","descAvailable":false,"reason":"citizenship/ITAR \u2014 'any other legally protected status. ITAR REQUIREMENTS To conform to U.S. Govern'"},{"id":"4119c9604b6b6a7c","title":"Senior MDAO Engineer","company":"mach","location":"Huntington Beach, CA","url":"https://jobs.ashbyhq.com/mach/292d7737-b723-4c77-9fb2-f570c13f3269","ats":"ashby","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T23:32:39.665000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"citizenship/ITAR \u2014 'ess to information protected under U.S. export control laws and regulations, including the Export A'"},{"id":"c28f2bab7c314a0a","title":"Senior Conceptual Design Engineer - Advanced Concepts","company":"mach","location":"Huntington Beach, CA","url":"https://jobs.ashbyhq.com/mach/a183e1f9-2e2e-41a5-ae7c-7bc651f85375","ats":"ashby","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T23:29:03.767000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"citizenship/ITAR \u2014 'ess to information protected under U.S. export control laws and regulations, including the Export A'"},{"id":"e07d6385545b0331","title":"Air Vehicle Design Engineer","company":"mach","location":"Huntington Beach, CA","url":"https://jobs.ashbyhq.com/mach/d2f070cb-0084-428a-b570-ccdda8af0016","ats":"ashby","level":"mid","levelSource":"years","levelWhy":"the description asks for 5+ years","postedAt":"2026-07-29T23:25:15.099000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"citizenship/ITAR \u2014 'ess to information protected under U.S. export control laws and regulations, including the Export A'"},{"id":"916d471e787d0e86","title":"3D Print Technician","company":"mach","location":"Huntington Beach, CA","url":"https://jobs.ashbyhq.com/mach/03708bb8-72ba-4b90-a8eb-015407b73c52","ats":"ashby","level":"mid","levelSource":"years","levelWhy":"the description asks for 3+ years","postedAt":"2026-07-29T22:10:43.019000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"citizenship/ITAR \u2014 'ess to information protected under U.S. export control laws and regulations, including the Export A'"},{"id":"156db1526ea658db","title":"Sr. Partnerships Manager (Starlink Business Aviation)","company":"SpaceX","location":"Woodinville, WA","url":"https://boards.greenhouse.io/spacex/jobs/8657724002?gh_jid=8657724002","ats":"greenhouse","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T22:08:49-04:00","remote":null,"employmentType":"","descAvailable":false,"reason":"citizenship/ITAR \u2014 'yover, and use requirements of the law. ITAR REQUIREMENTS: To conform to U.S. Gover'"},{"id":"f2f39e2267b53a54","title":"Sales Enablement Specialist (Starlink)","company":"SpaceX","location":"Hawthorne, CA","url":"https://boards.greenhouse.io/spacex/jobs/8657786002?gh_jid=8657786002","ats":"greenhouse","level":"entry","levelSource":"years","levelWhy":"the description asks for 1+ year","postedAt":"2026-07-29T22:04:56-04:00","remote":null,"employmentType":"","descAvailable":false,"reason":"citizenship/ITAR \u2014 'yover, and use requirements of the law. ITAR REQUIREMENTS: To conform to U.S. Gover'"},{"id":"1ad2cc56d52e27fa","title":"Sales Operations Lead (Enablement)","company":"SpaceX","location":"Hawthorne, CA","url":"https://boards.greenhouse.io/spacex/jobs/8657734002?gh_jid=8657734002","ats":"greenhouse","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T22:03:25-04:00","remote":null,"employmentType":"","descAvailable":false,"reason":"citizenship/ITAR \u2014 'yover, and use requirements of the law. ITAR REQUIREMENTS: To conform to U.S. Gover'"}],"security_clearance_required":[{"id":"a648ff16337a0709","title":"Electrical Engineer \u2013 UUVs & Undersea Electronics","company":"saronic","location":"Austin, TX","url":"https://jobs.ashbyhq.com/saronic/05c92ce4-4c7f-4bc8-a9ac-5675e76e4479","ats":"ashby","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-30T00:57:54.155000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"clearance required \u2014 's. - Ability to obtain and maintain a security clearance, where required. - Eligibility to acc'"},{"id":"0f3c786b4c7d7fca","title":"Flight Test Engineering Lead","company":"Anduril Industries","location":"Sydney, New South Wales, Australia","url":"https://boards.greenhouse.io/andurilindustries/jobs/5198229007?gh_jid=5198229007","ats":"greenhouse","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T23:29:42-04:00","remote":null,"employmentType":"","descAvailable":false,"reason":"clearance required \u2014 'Ability to obtain and maintain an NV1 Security Clearance DESIRED QUALIFICATIONS Experience wit'"},{"id":"993eab6aabbe7d3f","title":"Senior Software Engineer - NatSec ","company":"snowflake","location":"US-VA-Remote","url":"https://jobs.ashbyhq.com/snowflake/1d34ad09-5d5f-4efc-bdb5-43b9350800ce","ats":"ashby","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T22:30:12.469000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false,"reason":"clearance required \u2014 'ence or related degree REQUIREMENTS: Security Clearance - Required: Active TS/SCI clearance w'"},{"id":"8c6ce125b45670aa","title":"ETL Developer","company":"pingwind","location":"Remote","url":"https://jobs.lever.co/pingwind/2dac953a-fac7-4c44-b296-41e19236fa1d","ats":"lever","level":"mid","levelSource":"years","levelWhy":"the description asks for 5+ years","postedAt":"2026-07-29T20:49:44.912000+00:00","remote":true,"employmentType":"Full-Time","descAvailable":false,"reason":"clearance required \u2014 'Location: Remote Required Clearance: Public Trust Required: Certifications: N/A Required'"},{"id":"41dc8493030cc874","title":"Sr. Manager, Security Hardware","company":"SpaceX","location":"Hawthorne, CA","url":"https://boards.greenhouse.io/spacex/jobs/8657639002?gh_jid=8657639002","ats":"greenhouse","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T20:36:23-04:00","remote":null,"employmentType":"","descAvailable":false,"reason":"clearance required \u2014 'curity technology initiatives; maintain TS/SCI eligibility Oversee preventive mainten'"},{"id":"40a9c04c0df333dc","title":"Funding Operations Manager","company":"glsllc","location":"Greenville, South Carolina","url":"https://jobs.lever.co/glsllc/51168a69-1918-4d64-93f6-3f868f29a350","ats":"lever","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T18:31:31.622000+00:00","remote":null,"employmentType":"Full-Time","descAvailable":false,"reason":"clearance required \u2014 'Employment Opportunity (EEO) Employee Polygraph Protection Act (EPPA)'"},{"id":"0c2cdd508b5f714d","title":"Software Integration Engineer (SIE) 2","company":"wyetechllc","location":"Ft. Meade, Maryland","url":"https://jobs.lever.co/wyetechllc/11799eba-23ee-4b9e-bd4c-87a740a3723d","ats":"lever","level":"mid","levelSource":"title","levelWhy":"the title carries a mid marker","postedAt":"2026-07-29T18:16:44.690000+00:00","remote":null,"employmentType":"Software Engineering (Full-Time)","descAvailable":false,"reason":"clearance required \u2014 'es Citizenship and position appropriate security clearance is required. (e.g. Active TS/SCI securi'"},{"id":"072449b0f1862689","title":"Software Engineer 4","company":"wyetechllc","location":"Annapolis Junction, Maryland","url":"https://jobs.lever.co/wyetechllc/11e8f36c-83da-4d50-b5e5-ddeac84f6b6c","ats":"lever","level":"mid","levelSource":"title","levelWhy":"the title carries a mid marker","postedAt":"2026-07-29T18:10:33.318000+00:00","remote":null,"employmentType":"Software Engineering (Full-Time)","descAvailable":false,"reason":"clearance required \u2014 'es Citizenship and position appropriate security clearance is required. (e.g. Active TS/SCI securi'"}],"employer_will_not_sponsor":[{"id":"4119c9604b6b6a7c","title":"Senior MDAO Engineer","company":"mach","location":"Huntington Beach, CA","url":"https://jobs.ashbyhq.com/mach/292d7737-b723-4c77-9fb2-f570c13f3269","ats":"ashby","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T23:32:39.665000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"will not sponsor \u2014 '.S. export control laws and regulations without sponsorship for an export license. Mach participat'"},{"id":"c28f2bab7c314a0a","title":"Senior Conceptual Design Engineer - Advanced Concepts","company":"mach","location":"Huntington Beach, CA","url":"https://jobs.ashbyhq.com/mach/a183e1f9-2e2e-41a5-ae7c-7bc651f85375","ats":"ashby","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T23:29:03.767000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"will not sponsor \u2014 '.S. export control laws and regulations without sponsorship for an export license. Mach participat'"},{"id":"e07d6385545b0331","title":"Air Vehicle Design Engineer","company":"mach","location":"Huntington Beach, CA","url":"https://jobs.ashbyhq.com/mach/d2f070cb-0084-428a-b570-ccdda8af0016","ats":"ashby","level":"mid","levelSource":"years","levelWhy":"the description asks for 5+ years","postedAt":"2026-07-29T23:25:15.099000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"will not sponsor \u2014 '.S. export control laws and regulations without sponsorship for an export license. Mach participat'"},{"id":"916d471e787d0e86","title":"3D Print Technician","company":"mach","location":"Huntington Beach, CA","url":"https://jobs.ashbyhq.com/mach/03708bb8-72ba-4b90-a8eb-015407b73c52","ats":"ashby","level":"mid","levelSource":"years","levelWhy":"the description asks for 3+ years","postedAt":"2026-07-29T22:10:43.019000+00:00","remote":false,"employmentType":"FullTime","descAvailable":false,"reason":"will not sponsor \u2014 '.S. export control laws and regulations without sponsorship for an export license. Mach participat'"},{"id":"bac8702395651bf5","title":"AI Consultant - Pharmacovigilance/Safety Systems Implementation","company":"veeva","location":"Massachusetts - Boston","url":"https://jobs.lever.co/veeva/bd25fa26-0de8-496c-98a4-38101dfeadb1","ats":"lever","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-29T20:00:39.127000+00:00","remote":true,"employmentType":"Full-Time","descAvailable":false,"reason":"will not sponsor \u2014 'meet travel requirements. Veeva Systems does not anticipate providing sponsorship for employment visa status (e.g., H-1B,'"},{"id":"3763602c4a0491a7","title":"Engineer in Training, Roadway Design","company":"Woolpert","location":"Dallas, TX; Houston, TX","url":"https://job-boards.greenhouse.io/woolpert/jobs/4095349009","ats":"greenhouse","level":"unknown","levelSource":"none","levelWhy":"neither the title nor the description states a level","postedAt":"2026-07-29T18:21:14-04:00","remote":null,"employmentType":"","descAvailable":false,"reason":"will not sponsor \u2014 'nce experience has been gained! We are unable to provide visa sponsorship for this position. Applicants must alr'"},{"id":"339ee6dbaa8851ca","title":"Manager, Global Reverse Logistics","company":"Verkada","location":"San Mateo, CA United States","url":"https://job-boards.greenhouse.io/verkada/jobs/5198935007","ats":"greenhouse","level":"senior","levelSource":"title","levelWhy":"the title carries a senior marker","postedAt":"2026-07-29T18:15:08-04:00","remote":null,"employmentType":"","descAvailable":false,"reason":"will not sponsor \u2014 'y authorized to work in the U.S. We are unable to sponsor or take over sponsorship of an employme'"},{"id":"6e9e881d41a2be14","title":"Datacenter Infrastructure Specialist","company":"runpod","location":"Remote - USA","url":"https://jobs.ashbyhq.com/runpod/b07e836d-7232-4dee-bd16-7b6912323de7","ats":"ashby","level":"mid","levelSource":"years","levelWhy":"the description asks for 3+ years","postedAt":"2026-07-29T17:34:37.638000+00:00","remote":true,"employmentType":"FullTime","descAvailable":false,"reason":"will not sponsor \u2014 'nited States; however, we are currently unable to sponsor employment visas.'"}]},"excludedCounts":{"not_a_software_role":22074,"wrong_seniority_band":14320,"citizenship_or_itar_restricted":3355,"security_clearance_required":2707,"employer_will_not_sponsor":1146},"_demo":true};
+
+const fmt = n => n.toLocaleString('en-US');
+const el = (tag, cls, txt) => { const n = document.createElement(tag);
+  if (cls) n.className = cls; if (txt != null) n.textContent = txt; return n; };
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function ago(iso){
+  if (!iso) return 'undated';
+  const d = (Date.now() - new Date(iso)) / 86400000;
+  if (d < 1) return 'today';
+  if (d < 2) return 'yesterday';
+  if (d < 14) return Math.floor(d) + 'd ago';
+  if (d < 60) return Math.floor(d / 7) + 'w ago';
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+const GATE_LABEL = {
+  not_a_software_role: 'Not a software engineering role',
+  wrong_seniority_band: 'Wrong seniority band',
+  citizenship_or_itar_restricted: 'Citizenship or ITAR restricted',
+  security_clearance_required: 'Security clearance required',
+  employer_will_not_sponsor: 'Employer states it will not sponsor',
+};
+// The one gate with nothing to quote: it fires on the title, not on a sentence
+// in the description. Saying so is the honest thing; dressing it up as a
+// quotation would make an unverifiable rule look evidenced.
+const RULE_ONLY = new Set(['not_a_software_role', 'wrong_seniority_band']);
+
+/* ── level badge, honest about provenance ───────────────────────────── */
+function levelBadge(role){
+  const word = role.level === 'unknown' ? 'unverified' : role.level;
+  const b = el('span', 'lvl lvl-' + role.level);
+  b.append(document.createTextNode(word));
+  b.title = role.levelWhy || '';
+  return b;
+}
+
+/* ── one row, built once, never re-rendered on interaction ──────────── */
+function buildRow(role){
+  const row = el('div', 'row'); row.dataset.open = '0';
+
+  const head = el('button', 'row-main');
+  head.setAttribute('aria-expanded', 'false');
+  head.append(el('span', 'caret', '▶'));
+
+  const t = el('div', 'row-t');
+  const title = el('div', 'row-title');
+  title.append(document.createTextNode(role.title + '  '));
+  title.append(levelBadge(role));
+  t.append(title);
+  const bits = [role.company, role.location || null,
+    role.remote === true ? 'remote' : null, role.ats].filter(Boolean);
+  t.append(el('div', 'row-meta', bits.join('  ·  ')));
+  head.append(t);
+  head.append(el('span', 'row-when', ago(role.postedAt)));
+
+  const detail = el('div', 'detail');
+  const why = el('div', 'why');
+  why.innerHTML = role.level === 'unknown'
+    ? '<b>Level unverified.</b> ' + esc(role.levelWhy) +
+      ' — it could be a new-grad opening or it could want ten years. Read the requirements before spending time on it.'
+    : '<b>Read as ' + esc(role.level) + '</b> because ' + esc(role.levelWhy) + '.';
+  detail.append(why);
+
+  if (role.descAvailable && role.descPreview) {
+    detail.append(el('div', 'desc', role.descPreview));
+  } else {
+    detail.append(el('div', 'note',
+      'This source returns no description, so only the title was screened.'));
+  }
+
+  const actions = el('div', 'actions');
+  const open = el('a', 'btn', 'Open the posting ↗');
+  open.href = role.url; open.target = '_blank'; open.rel = 'noopener noreferrer';
+  actions.append(open);
+  const dismiss = el('button', 'btn btn-2', 'Not for me');
+  dismiss.addEventListener('click', () => {
+    row.remove(); recount();
+  });
+  actions.append(dismiss);
+  detail.append(actions);
+
+  head.addEventListener('click', () => {
+    const open = row.dataset.open === '1';
+    row.dataset.open = open ? '0' : '1';
+    head.setAttribute('aria-expanded', String(!open));
+  });
+
+  row.append(head, detail);
+  return row;
+}
+
+/* ── Today ──────────────────────────────────────────────────────────── */
+let activeLevel = 'all';
+
+function recount(){
+  const shown = document.querySelectorAll('#backlog .row').length;
+  const c = document.getElementById('backlog-count');
+  if (c) c.textContent = fmt(shown) + ' shown of ' + fmt(DATA.worklistTotal);
+}
+
+function renderToday(){
+  const v = document.getElementById('view-today');
+  v.textContent = '';
+  const fresh = DATA.newSinceYesterday || [];
+
+  v.append(el('div', 'eyebrow', 'New since yesterday'));
+
+  if (!fresh.length) {
+    const z = el('div', 'zero');
+    z.append(el('div', 'zero-n', '0'));
+    z.append(el('div', 'zero-lead', 'Nothing new got through today.'));
+    const body = el('div', 'zero-body');
+    body.innerHTML = '<b>This is what most mornings look like, and it is the point.</b> ' +
+      'All ' + fmt(DATA.funnel.fetched) + ' open roles were read and re-checked; ' +
+      'none of them were both new and applicable. There is nothing here for you to do.';
+    z.append(body);
+    const run = el('div', 'run');
+    [['Boards read', DATA.companies + ' companies'],
+     ['Roles checked', fmt(DATA.funnel.fetched)],
+     ['Applicable right now', fmt(DATA.funnel.kept)],
+     ['Not applicable to you', fmt(DATA.funnel.excluded)]].forEach(([k, val]) => {
+      const d = el('div'); d.append(el('b', null, val)); d.append(el('span', null, k)); run.append(d);
+    });
+    z.append(run);
+    v.append(z);
+  } else {
+    const list = el('div', 'list');
+    fresh.forEach(r => list.append(buildRow(r)));
+    v.append(list);
+  }
+
+  /* backlog, collapsed */
+  const sh = el('div', 'section-head');
+  sh.append(el('h2', null, 'Backlog'));
+  const cnt = el('span', 'count'); cnt.id = 'backlog-count'; sh.append(cnt);
+  const tools = el('div', 'tools');
+  const levels = [['all', 'All'], ['entry', 'Entry ' + (DATA.levels.entry || 0)],
+    ['intern', 'Intern ' + (DATA.levels.intern || 0)],
+    ['unknown', 'Unverified ' + (DATA.levels.unknown || 0)]];
+  levels.forEach(([key, label]) => {
+    const c = el('button', 'chip', label);
+    c.setAttribute('aria-pressed', String(activeLevel === key));
+    c.addEventListener('click', () => { activeLevel = key; renderToday(); });
+    tools.append(c);
+  });
+  sh.append(tools);
+  v.append(sh);
+
+  const shown = DATA.worklist.filter(r => activeLevel === 'all' || r.level === activeLevel);
+  const list = el('div', 'list'); list.id = 'backlog';
+  if (!shown.length) {
+    list.append(el('div', 'note', 'Nothing in the loaded sample matches that filter.'));
+  } else {
+    shown.forEach(r => list.append(buildRow(r)));
+  }
+  v.append(list);
+  recount();
+
+  const more = el('button', 'more');
+  more.innerHTML = 'Showing <b>' + shown.length + '</b> of <b>' +
+    fmt(DATA.worklistTotal) + '</b> applicable roles. The rest are a one-time backlog from ' +
+    'the first run — in steady state only a handful appear per day.';
+  more.disabled = true; more.style.cursor = 'default';
+  v.append(more);
+}
+
+/* ── Evidence ───────────────────────────────────────────────────────── */
+function renderEvidence(){
+  const v = document.getElementById('view-evidence');
+  if (v.dataset.built === '1') return;   // built once
+  v.dataset.built = '1';
+
+  v.append(el('h1', null, 'Why things were dropped'));
+  const lede = el('p', 'lede');
+  lede.innerHTML = 'Every exclusion below quotes the sentence from the job description ' +
+    'that caused it, so you can check the filter instead of trusting it. ' +
+    'If a quote looks wrong, the filter is wrong — flag it.';
+  v.append(lede);
+
+  const f = el('div', 'funnel');
+  const nums = el('div', 'fnum');
+  [[fmt(DATA.funnel.fetched), 'roles read'],
+   [fmt(DATA.funnel.excluded), 'not applicable to you'],
+   [fmt(DATA.funnel.kept), 'left for you'],
+   [fmt(DATA.funnel.needsLevelCheck), 'of those, level unverified']].forEach(([n, l]) => {
+    const d = el('div'); d.append(el('b', null, n)); d.append(el('span', null, l)); nums.append(d);
+  });
+  f.append(nums);
+  const cav = el('div', 'caveat');
+  cav.innerHTML = '<b>The gate counts below add up to ' + fmt(DATA.funnel.gateCountTotal) +
+    ', which is more than the ' + fmt(DATA.funnel.excluded) + ' roles actually removed.</b> ' +
+    'That is expected, not an error: a role routinely fails several gates at once — ' +
+    'senior <em>and</em> clearance-only <em>and</em> citizenship-restricted. ' +
+    'So these are five overlapping counts, not a subtraction chain.';
+  f.append(cav);
+  v.append(f);
+
+  Object.entries(DATA.excludedCounts)
+    .sort((a, b) => b[1] - a[1])
+    .forEach(([gate, count]) => {
+      const g = el('div', 'gate'); g.dataset.open = '0';
+      const h = el('button', 'gate-h');
+      h.setAttribute('aria-expanded', 'false');
+      h.append(el('span', 'caret', '▶'));
+      h.append(el('span', 'gate-name', GATE_LABEL[gate] || gate));
+      h.append(el('span', 'gate-n', fmt(count) + ' roles'));
+      const body = el('div', 'gate-body');
+
+      if (RULE_ONLY.has(gate)) {
+        const n = el('div', 'noquote');
+        n.innerHTML = '<b>No sentence quoted.</b> This gate fires on the job title, not on ' +
+          'anything written in the description — so there is nothing to quote. ' +
+          'Of the five gates, this is the one you are trusting rather than verifying.';
+        body.append(n);
+      }
+      (DATA.excludedSamples[gate] || []).forEach(r => {
+        body.append(el('div', 'ex-title', r.title));
+        body.append(el('div', 'ex-co', r.company + (r.location ? '  ·  ' + r.location : '')));
+        body.append(el(RULE_ONLY.has(gate) ? 'noquote' : 'quote',
+          RULE_ONLY.has(gate) ? 'noquote' : 'quote', r.reason));
+        const fl = el('button', 'flag', 'Flag as a misfire');
+        fl.setAttribute('aria-pressed', 'false');
+        fl.addEventListener('click', () => {
+          const on = fl.getAttribute('aria-pressed') === 'true';
+          fl.setAttribute('aria-pressed', String(!on));
+          fl.textContent = on ? 'Flag as a misfire' : 'Flagged — will review';
+        });
+        body.append(fl);
+      });
+      h.addEventListener('click', () => {
+        const open = g.dataset.open === '1';
+        g.dataset.open = open ? '0' : '1';
+        h.setAttribute('aria-expanded', String(!open));
+      });
+      g.append(h, body);
+      v.append(g);
+    });
+}
+
+/* ── routing ────────────────────────────────────────────────────────── */
+function show(which){
+  const t = which === 'today';
+  document.getElementById('view-today').hidden = !t;
+  document.getElementById('view-evidence').hidden = t;
+  document.getElementById('nav-today').setAttribute('aria-current', t ? 'page' : 'false');
+  document.getElementById('nav-evidence').setAttribute('aria-current', t ? 'false' : 'page');
+  if (!t) renderEvidence();
+  window.scrollTo(0, 0);
+}
+document.getElementById('nav-today').addEventListener('click', () => show('today'));
+document.getElementById('nav-evidence').addEventListener('click', () => show('evidence'));
+
+renderToday();
+</script>
+</body>
+</html>
