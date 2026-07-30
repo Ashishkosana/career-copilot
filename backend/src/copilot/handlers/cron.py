@@ -26,7 +26,7 @@ def build_service(settings: Settings) -> DailyBriefingService:
     return DailyBriefingService(
         mailbox=GmailMailbox(),
         jobs=JaJobSource(settings.ja_db_path),
-        llm=LlmReplyDrafter(api_key=settings.gemini_api_key),
+        llm=LlmReplyDrafter(api_key=settings.llm_api_key),
         store=DynamoDbStore(settings.table_name, region=settings.aws_region),
         min_score=settings.min_job_score,
         max_jobs=settings.max_jobs,

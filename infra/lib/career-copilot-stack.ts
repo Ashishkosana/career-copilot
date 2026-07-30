@@ -77,7 +77,9 @@ export class CareerCopilotStack extends cdk.Stack {
       handler: "career_copilot.lambda_handler.cron_handler",
       environment: {
         ...common.environment,
-        MY_EMAIL: "ashishkosana@gmail.com",
+        // Public repo: never hardcode a personal address here. Supply it at
+        // deploy time, e.g. `cdk deploy -c myEmail=you@example.com`.
+        MY_EMAIL: this.node.tryGetContext("myEmail") ?? process.env.MY_EMAIL ?? "",
         OWNER_USER_ID: ownerUserId,
         CLAUDE_SECRET_ID: claudeSecret.secretName,
         APIFY_SECRET_ID: apifySecret.secretName,

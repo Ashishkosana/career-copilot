@@ -1,0 +1,25 @@
+{
+  "_comment": "Copy to private/profile.json and fill in. Nothing here is read at import time; it is loaded on demand through copilot.config.Settings.private_dir.",
+  "name": {
+    "first": "First",
+    "last": "Last"
+  },
+  "email": "you@example.com",
+  "phone": "000-000-0000",
+  "location": {
+    "city": "City",
+    "state": "ST",
+    "country": "United States"
+  },
+  "links": {
+    "github": "https://github.com/your-handle",
+    "linkedin": "https://linkedin.com/in/your-handle",
+    "website": "https://example.com"
+  },
+  "authorization": {
+    "authorized_to_work_us": true,
+    "requires_sponsorship_now_or_future": true,
+    "visa_status": "F-1 OPT",
+    "_note": "Answer sponsorship honestly. Many forms ask 'now OR in the future', which is a different question from 'are you authorized today'."
+  }
+}

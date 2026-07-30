@@ -40,7 +40,11 @@ class SignInPage extends ConsumerStatefulWidget {
 }
 
 class _SignInPageState extends ConsumerState<SignInPage> {
-  final _email = TextEditingController(text: 'ashishkosana@gmail.com');
+  // Public repo: no personal address prefilled. Pass one for local convenience
+  // with `flutter run --dart-define=COPILOT_EMAIL=you@example.com`.
+  final _email = TextEditingController(
+    text: const String.fromEnvironment('COPILOT_EMAIL'),
+  );
   final _password = TextEditingController();
   bool _loading = false;
   String? _error;

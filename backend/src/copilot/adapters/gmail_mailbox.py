@@ -118,7 +118,7 @@ def load_gmail_credentials(secret: Mapping[str, str]) -> Any:
     """
     from google.oauth2.credentials import Credentials
 
-    return Credentials(  # type: ignore[no-untyped-call]  # google-auth ships no stubs
+    return Credentials(
         token=secret.get("token"),
         refresh_token=secret.get("refresh_token"),
         token_uri=secret.get("token_uri", "https://oauth2.googleapis.com/token"),

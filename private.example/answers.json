@@ -1,0 +1,61 @@
+{
+  "_comment": "Copy to private/answers.json. Keys are stable slugs; the tool matches a form question to a slug by normalising the question label (lowercase, strip punctuation, strip company name, strip '(optional)'). 'aliases' is ORDERED — the tool picks the first alias that actually appears in the form's option set, and flags the question rather than guessing when none match.",
+
+  "work_authorization": {
+    "question_examples": [
+      "Are you legally authorized to work in the United States?",
+      "Do you have the right to work in the US?"
+    ],
+    "aliases": ["Yes", "Yes, I am authorized to work in the US"],
+    "locked": true
+  },
+
+  "requires_sponsorship": {
+    "question_examples": [
+      "Will you now or in the future require sponsorship for employment visa status?",
+      "Do you require visa sponsorship?"
+    ],
+    "aliases": ["Yes"],
+    "locked": true,
+    "note": "Answered honestly. 'Now OR in the future' is a different question from current authorization."
+  },
+
+  "how_did_you_hear": {
+    "question_examples": ["How did you first hear about us?"],
+    "aliases": [
+      "Career Platform (LinkedIn, Glassdoor, BuiltIn, etc.)",
+      "Job Board",
+      "LinkedIn",
+      "Other"
+    ]
+  },
+
+  "previously_employed": {
+    "question_examples": ["Have you previously been employed by this company?"],
+    "aliases": ["No"]
+  },
+
+  "salary_expectation": {
+    "question_examples": ["What are your salary expectations?"],
+    "aliases": ["Open / negotiable based on total compensation"],
+    "locked": true
+  },
+
+  "start_date": {
+    "question_examples": ["When are you available to start?"],
+    "aliases": ["Immediately", "Two weeks from offer"]
+  },
+
+  "relocate": {
+    "question_examples": ["Are you willing to relocate?"],
+    "aliases": ["Yes"]
+  },
+
+  "_eeo": {
+    "_comment": "Demographic questions are optional on every US form. Leave these blank to decline, or set them if you prefer to answer. The tool never fills a blank as a guess.",
+    "gender": "",
+    "race_ethnicity": "",
+    "veteran_status": "",
+    "disability_status": ""
+  }
+}
