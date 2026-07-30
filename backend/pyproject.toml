@@ -40,6 +40,9 @@ ignore = ["PLR0913"]  # allow richer function signatures in orchestration
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PLR2004"]  # magic values in assertions are fine in tests
+# Job descriptions genuinely contain en dashes ("3–5 years") and curly
+# apostrophes ("years' experience"); the patterns must match the real characters.
+"src/copilot/domain/seniority.py" = ["RUF001", "RUF003"]
 # Adapters lazy-import their cloud/vendor SDK inside the method that needs it, so
 # importing the package never drags in boto3/google or requires credentials.
 "src/copilot/adapters/*" = ["PLC0415"]
