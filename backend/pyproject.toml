@@ -43,6 +43,8 @@ ignore = ["PLR0913"]  # allow richer function signatures in orchestration
 # Job descriptions genuinely contain en dashes ("3–5 years") and curly
 # apostrophes ("years' experience"); the patterns must match the real characters.
 "src/copilot/domain/seniority.py" = ["RUF001", "RUF003"]
+# Résumé prose really contains curly apostrophes; the word pattern must match them.
+"src/copilot/domain/tailoring.py" = ["RUF001"]
 # Report scripts are long straight-line printing; splitting them hurts readability.
 "scripts/**" = ["PLR0915"]
 # Adapters lazy-import their cloud/vendor SDK inside the method that needs it, so
