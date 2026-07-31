@@ -26,16 +26,47 @@ class Settings(BaseSettings):
     table_name: str = "career-copilot"
     aws_region: str = "us-east-1"
 
+    #: DynamoDB table holding the v2 posting corpus. **Empty means "use SQLite"** —
+    #: a deliberate default so a clone of this public repo runs locally against a
+    #: file with no AWS account. This is a *different* table from ``table_name``:
+    #: that one is the v1 briefing store with an incompatible data model, and
+    #: pointing both at one name would let a briefing item and a posting collide.
+    postings_table_name: str = ""
+
     # --- identity (set via env or SSM; never committed) ---
     owner_user_id: str = ""  # Cognito sub the cron writes the briefing under
     my_email: str = ""
 
     # --- secret ids resolved at runtime in the cloud ---
+    #: A Secrets Manager secret id: the Gmail grant is a JSON document, which has no
+    #: sane single-value encoding, so this tier is secret-store-or-nothing.
     gmail_secret_id: str = "career-copilot/gmail"
-    llm_secret_id: str = "career-copilot/llm"
+    #: An **SSM Parameter Store path**, not a Secrets Manager id. The two API keys
+    #: are single opaque strings, and a SecureString parameter is the cheaper store
+    #: for that shape; ``AwsSecrets.api_key`` reads parameters and
+    #: ``AwsSecrets.secret_json`` reads secrets, so the store follows from the shape.
+    #:
+    #: These defaults are the *same strings the stack sets* as ``COPILOT_LLM_SECRET_ID``
+    #: and ``COPILOT_INTERPRETER_SECRET_ID``. They used to be ``career-copilot/llm``
+    #: and ``career-copilot/interpreter`` — Secrets Manager-shaped names, overridden
+    #: in the cloud by the env vars and therefore harmless there, but locally they
+    #: named a parameter that will never exist and resolved to ``""`` forever. A
+    #: default that is wrong everywhere the env var is absent is a default that
+    #: teaches the wrong name; ``tests/test_handlers.py`` pins these against the
+    #: paths in ``infra/lib/career-copilot-stack.ts``.
+    llm_secret_id: str = "/career-copilot/llm-api-key"
+    #: Kept separate from ``llm_secret_id`` on purpose. That one holds the reply
+    #: drafter's credentials for a different provider; handing them to the
+    #: interpreter's client would authenticate against the wrong API and fail in a
+    #: way that looks like a bad key rather than a mis-wiring.
+    interpreter_secret_id: str = "/career-copilot/interpreter-api-key"
 
     # --- direct keys (local dev / tests only; prefer secrets in the cloud) ---
     llm_api_key: str = ""
+    #: Absent is a supported state, not an error: the interpreter is the optional
+    #: tier that reads a level out of an ambiguous description, and every caller
+    #: falls back to the rule verdict when it returns nothing.
+    interpreter_api_key: str = ""
 
     # --- private content (gitignored; see private.example/) ---
     private_dir: Path = Field(
@@ -49,11 +80,9 @@ class Settings(BaseSettings):
     search_text: str = "software engineer"
     fetch_workers: int = Field(default=6, ge=1, le=16)
 
-    # --- legacy job engine ---
-    # Still read by handlers/cron.py, which runs the v1 briefing path. That path
-    # is being replaced by the ATS watchlist above; these go when it does.
-    ja_db_path: str = ""
-    min_job_score: int = Field(default=40, ge=0, le=100)
+    #: How many new roles reach the daily briefing. A cap on the *digest*, never on
+    #: the corpus: the worklist API serves every applicable role, and the run
+    #: summary reports the full ``kept`` count so this cap cannot read as supply.
     max_jobs: int = Field(default=8, ge=1, le=50)
 
     # --- résumé build (local only — Lambda has no browser) ---

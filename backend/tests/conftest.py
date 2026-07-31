@@ -5,7 +5,6 @@ against them with no cloud or network.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from copilot.domain.models import (
@@ -15,6 +14,7 @@ from copilot.domain.models import (
     Job,
     TriagedEmail,
 )
+from copilot.domain.posting import Posting
 
 FIXED_NOW = datetime(2026, 7, 6, 14, 0, 0, tzinfo=UTC)
 
@@ -65,12 +65,42 @@ class FakeMailbox:
         self.sent.append((to, subject, body))
 
 
-class FakeJobs:
-    def __init__(self, postings: list[Mapping[str, str]] | None = None) -> None:
+class FakePostings:
+    """A PostingSourcePort over a fixed list.
+
+    Replaces the old ``FakeJobs``, which returned bare mappings because the source
+    it doubled read a ``ja`` database that existed nowhere and fell back to a
+    fixture of invented companies. The port now speaks ``Posting``, so the fake
+    does too — a fake that models a shape the real adapter no longer produces is
+    worse than no fake at all.
+    """
+
+    name = "fake"
+
+    def __init__(self, postings: list[Posting] | None = None) -> None:
         self._postings = postings or []
 
-    def fetch(self) -> list[Mapping[str, str]]:
-        return self._postings
+    def fetch(self) -> list[Posting]:
+        return list(self._postings)
+
+
+def make_posting(
+    n: int = 1,
+    title: str = "New Grad Software Engineer",
+    *,
+    company: str = "Acme",
+    desc: str = "Build REST APIs in Python on AWS. 1+ years of experience.",
+) -> Posting:
+    return Posting(
+        title=title,
+        company=company,
+        url=f"https://boards.example/{n}",
+        ats="greenhouse",
+        location="Remote (US)",
+        description=desc,
+        desc_available=bool(desc),
+        posted_at=datetime(2026, 7, 6, 14, 0, 0, tzinfo=UTC),
+    )
 
 
 class FakeLLM:

@@ -1,0 +1,2083 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>career-copilot — worklist</title>
+<style>
+/* ── tokens ───────────────────────────────────────────────────────────── */
+:root{
+  --bg:#fbfbfa; --surface:#fff; --sunk:#f4f4f2; --line:#e3e3df; --line-strong:#c9c9c3;
+  --ink:#1a1a18; --ink-2:#55554e;
+  /* --ink-3 was #7a7a72, which measures 4.18:1 on --bg — under AA for the 12-13px
+     text it is used for. #6b6b63 measures 5.18:1 on --bg and 5.42:1 on white. */
+  --ink-3:#6b6b63;
+  --accent:#1c5d4a; --accent-soft:#e6f0ec; --accent-line:#9dc2b4;
+  --warn:#8a5a10; --warn-soft:#fbf1de; --warn-line:#dfb877;
+  --stop:#8f2e21; --stop-soft:#fbeae7; --stop-line:#dda69c;
+  /* Internships get their own hue so they can never be read as the green
+     "eligible full-time role" family. #2b4f8a measures 6.96:1 on --info-soft and
+     8.1:1 on white; --ink-2 on --info-tint measures 7.1:1 — all past AA. Colour is
+     never the only signal: every internship also carries the word "Internship". */
+  --info:#2b4f8a; --info-soft:#e8eef8; --info-line:#9fb4d6; --info-tint:#f6f8fc;
+  --radius:7px; --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans);
+  font-feature-settings:"kern" 1}
+h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.011em}
+a{color:var(--accent)}
+button{font:inherit;color:inherit}
+:focus-visible{outline:2.5px solid var(--accent);outline-offset:2px;border-radius:3px}
+.sr{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;
+  clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.skip{position:absolute;left:-9999px;top:0;background:var(--surface);padding:10px 14px;
+  border:1px solid var(--line-strong);border-radius:var(--radius);z-index:40}
+.skip:focus{left:12px;top:8px}
+
+/* ── shell ────────────────────────────────────────────────────────────── */
+.wrap{max-width:1100px;margin:0 auto;padding:0 28px 96px}
+header{border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:20}
+.head{max-width:1100px;margin:0 auto;padding:14px 28px;display:flex;align-items:baseline;gap:20px}
+.brand{font-size:14.5px;font-weight:650}
+.brand span{color:var(--ink-3);font-weight:450}
+nav{margin-left:auto;display:flex;gap:2px}
+nav button{background:none;border:0;padding:7px 13px;border-radius:var(--radius);
+  color:var(--ink-2);cursor:pointer;font-size:14px}
+nav button:hover{background:var(--sunk)}
+nav button[aria-current="page"]{background:var(--ink);color:#fff;font-weight:550}
+
+/* ── provenance banner: which data you are looking at, always ─────────── */
+.src{display:flex;gap:10px;align-items:flex-start;margin:20px 0 0;padding:11px 14px;
+  border:1px solid var(--line);border-radius:9px;background:var(--surface);font-size:13px;
+  color:var(--ink-2)}
+.src[data-kind="snapshot"]{background:var(--warn-soft);border-color:var(--warn-line)}
+.src b{color:var(--ink)}
+.src-tag{flex-shrink:0;font-weight:650;font-size:11.5px;letter-spacing:.05em;
+  text-transform:uppercase;padding-top:1px}
+
+/* ── the quiet morning ────────────────────────────────────────────────── */
+.today{padding:8px 0 0}
+.eyebrow{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);
+  font-weight:600;margin:26px 0 12px}
+.zero{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:30px 30px}
+.zero-n{font-size:56px;line-height:.95;font-weight:680;letter-spacing:-.035em;margin-bottom:6px;
+  font-variant-numeric:tabular-nums}
+.zero-lead{font-size:17.5px;font-weight:550;margin-bottom:8px}
+.zero-body{color:var(--ink-2);max-width:62ch;font-size:14.5px}
+.zero-body b{color:var(--ink);font-weight:600}
+.run{margin-top:20px;padding-top:16px;border-top:1px solid var(--line);
+  display:flex;gap:26px;flex-wrap:wrap;font-size:13px;color:var(--ink-3)}
+.run b{display:block;color:var(--ink);font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
+
+/* ── sections + filters ───────────────────────────────────────────────── */
+.section-head{display:flex;align-items:baseline;gap:12px;margin:32px 0 10px;flex-wrap:wrap}
+.section-head h2{font-size:16px}
+.count{font-size:13px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+.blurb{font-size:13.5px;color:var(--ink-2);max-width:74ch;margin:0 0 12px}
+.blurb b{color:var(--ink)}
+
+.filters{border:1px solid var(--line);border-radius:10px;background:var(--surface);
+  padding:12px 14px;margin-bottom:12px}
+.frow{display:flex;align-items:baseline;gap:10px;padding:4px 0;flex-wrap:wrap}
+.flabel{font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);
+  font-weight:600;min-width:72px;flex-shrink:0}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{background:var(--surface);border:1px solid var(--line-strong);border-radius:999px;
+  padding:4px 11px;font-size:12.5px;color:var(--ink-2);cursor:pointer;
+  font-variant-numeric:tabular-nums}
+.chip:hover:not(:disabled){border-color:var(--ink-3)}
+.chip[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:#fff;font-weight:550}
+.chip:disabled{opacity:.5;cursor:not-allowed}
+.chip .n{opacity:.72;margin-left:5px;font-size:11.5px}
+.search{display:flex;gap:8px;align-items:center;padding:8px 0 2px}
+.search input{flex:1;min-width:0;font:inherit;font-size:13.5px;padding:7px 11px;
+  border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--surface);
+  color:var(--ink)}
+.search-note{font-size:12px;color:var(--ink-3)}
+.reset{background:none;border:0;color:var(--accent);font-size:12.5px;cursor:pointer;
+  text-decoration:underline;padding:4px 2px}
+
+/* ── rows ─────────────────────────────────────────────────────────────── */
+.list{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--surface)}
+.row{border-bottom:1px solid var(--line)}
+.row:last-child{border-bottom:0}
+.row-main{display:flex;align-items:flex-start;gap:12px;padding:12px 15px;width:100%;
+  background:none;border:0;text-align:left;cursor:pointer}
+.row-main:hover{background:var(--sunk)}
+.row-t{flex:1;min-width:0}
+.row-title{font-weight:600;font-size:14.5px;display:flex;gap:7px;align-items:baseline;
+  flex-wrap:wrap}
+.row-meta{color:var(--ink-3);font-size:12.5px;margin-top:3px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row-score{font-size:12.5px;color:var(--ink-2);margin-top:4px;
+  font-variant-numeric:tabular-nums}
+.row-right{flex-shrink:0;display:flex;flex-direction:column;align-items:flex-end;gap:4px;
+  padding-top:1px}
+.row-when{font-size:12px;color:var(--ink-3);font-variant-numeric:tabular-nums;white-space:nowrap}
+.caret{flex-shrink:0;color:var(--ink-3);transition:transform .12s;font-size:11px;padding-top:4px}
+.row[data-open="1"] .caret{transform:rotate(90deg)}
+
+/* Badges carry a glyph *and* a word, so nothing is signalled by colour alone. */
+.lvl,.tier,.aged{display:inline-flex;align-items:center;gap:5px;border-radius:5px;
+  padding:2px 7px;font-size:11.5px;font-weight:600;border:1px solid;white-space:nowrap}
+.lvl-entry{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+.lvl-intern{background:var(--info-soft);border-color:var(--info-line);color:var(--info)}
+.lvl-unknown{background:var(--warn-soft);border-color:var(--warn-line);color:var(--warn)}
+.lvl-mid,.lvl-senior{background:var(--stop-soft);border-color:var(--stop-line);color:var(--stop)}
+.lvl::before{content:"●";font-size:8px}
+.lvl-unknown::before{content:"▲"}
+
+.tier-exact{background:var(--accent);border-color:var(--accent);color:#fff}
+.tier-exact::before{content:"◆";font-size:9px}
+.tier-strong{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+.tier-strong::before{content:"●";font-size:8px}
+.tier-partial{background:var(--sunk);border-color:var(--line-strong);color:var(--ink-2)}
+.tier-partial::before{content:"◐";font-size:9px}
+.tier-weak{background:var(--surface);border-color:var(--line-strong);color:var(--ink-3)}
+.tier-weak::before{content:"○";font-size:9px}
+.tier-unscored{background:var(--warn-soft);border-color:var(--warn-line);color:var(--warn)}
+.tier-unscored::before{content:"▲";font-size:9px}
+.aged{background:var(--warn-soft);border-color:var(--warn-line);color:var(--warn);font-weight:550}
+.aged::before{content:"⧗"}
+
+/* ── internships: a second collection, never mixed into the worklist ───── */
+/* The whole section sits inside one tinted, thick-left-ruled panel, so an
+   internship row is never one row away from a full-time row on the same white
+   surface. Collapsed by default: it is a side channel, not the worklist. */
+/* The left rule is --info, not --info-line: at 1.98:1 the light border is a hint, and
+   this panel's job is to be unmistakable. --info measures 8.1:1 against the page. */
+.intern{margin:32px 0 0;border:1px solid var(--info-line);border-left:5px solid var(--info);
+  border-radius:10px;background:var(--info-tint);padding:13px 16px}
+.intern h2{margin:0}
+.intern-h{display:flex;align-items:baseline;gap:11px;width:100%;background:none;border:0;
+  padding:0;text-align:left;cursor:pointer;flex-wrap:wrap;font-weight:inherit}
+.intern-title{font-size:16px;font-weight:650;letter-spacing:-.011em}
+.intern[data-open="1"] .caret{transform:rotate(90deg)}
+.intern-body{display:none;margin-top:6px}
+.intern[data-open="1"] .intern-body{display:block}
+.intern .blurb{max-width:78ch}
+.intern .list{border-color:var(--info-line)}
+.intern-why{font-size:13.5px;color:var(--ink-2);max-width:78ch;margin:8px 0 12px}
+.intern-why b{color:var(--ink)}
+.tag-intern{display:inline-flex;align-items:center;gap:5px;border-radius:5px;padding:2px 7px;
+  font-size:11.5px;font-weight:650;border:1px solid var(--info-line);
+  background:var(--info-soft);color:var(--info);white-space:nowrap}
+.tag-intern::before{content:"◇";font-size:9px}
+.intern-note{font-size:12.5px;color:var(--info);font-weight:600;margin-top:2px}
+
+.detail{padding:0 16px 18px 42px;display:none}
+.row[data-open="1"] .detail{display:block}
+.why{background:var(--sunk);border-left:3px solid var(--line-strong);padding:10px 13px;
+  border-radius:0 6px 6px 0;font-size:13px;color:var(--ink-2);margin-bottom:12px}
+.why b{color:var(--ink)}
+.desc{font-size:13.5px;color:var(--ink-2);max-width:78ch;white-space:pre-wrap;
+  margin-top:10px}
+.actions{margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.btn{background:var(--ink);color:#fff;border:1px solid var(--ink);border-radius:var(--radius);
+  padding:8px 15px;font-size:13.5px;font-weight:550;cursor:pointer;text-decoration:none;
+  display:inline-block;min-height:36px;line-height:20px}
+.btn:hover{background:#000}
+.btn-2{background:var(--surface);color:var(--ink);border-color:var(--line-strong)}
+.btn-2:hover{background:var(--sunk)}
+.btn:disabled{opacity:.55;cursor:not-allowed}
+.note{font-size:12.5px;color:var(--ink-3);max-width:78ch}
+.pad{padding:14px 16px}
+
+/* ── the score, shown as a set of components ──────────────────────────── */
+.score{border:1px solid var(--line);border-radius:9px;padding:12px 13px;margin-bottom:12px;
+  background:var(--surface)}
+.score-top{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;margin-bottom:9px}
+.score-line{font-size:13px;color:var(--ink-2);font-variant-numeric:tabular-nums}
+.comp{margin-top:9px}
+.comp-h{font-size:12px;color:var(--ink-3);font-weight:600;margin-bottom:5px;
+  font-variant-numeric:tabular-nums}
+.toks{display:flex;gap:5px;flex-wrap:wrap}
+.tok{font-size:12px;padding:2px 8px;border-radius:999px;border:1px solid;white-space:nowrap}
+.tok-have{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent)}
+.tok-have::before{content:"✓ "}
+.tok-miss{background:var(--stop-soft);border-color:var(--stop-line);color:var(--stop)}
+.tok-miss::before{content:"✗ "}
+.score-foot{margin-top:11px;padding-top:9px;border-top:1px solid var(--line);
+  font-size:12px;color:var(--ink-3);max-width:76ch}
+
+/* ── paging ───────────────────────────────────────────────────────────── */
+.more{width:100%;background:var(--sunk);border:1px dashed var(--line-strong);
+  border-radius:10px;padding:14px;margin-top:12px;color:var(--ink-2);cursor:pointer;
+  font-size:13.5px;text-align:center}
+.more:hover:not(:disabled){background:#eeeeea}
+.more:disabled{cursor:default}
+.more b{color:var(--ink)}
+.tail{margin-top:12px;font-size:12.5px;color:var(--ink-3);text-align:center}
+.err{margin-top:12px;padding:11px 13px;border:1px solid var(--stop-line);
+  background:var(--stop-soft);border-radius:9px;font-size:13px;color:#4a2b25}
+
+/* ── evidence ledger ──────────────────────────────────────────────────── */
+.lede{max-width:66ch;color:var(--ink-2);font-size:14.5px;margin:6px 0 26px}
+.funnel{background:var(--surface);border:1px solid var(--line);border-radius:12px;
+  padding:24px;margin-bottom:12px}
+.fnum{display:flex;gap:40px;flex-wrap:wrap;align-items:flex-end}
+.fnum div{min-width:120px}
+.fnum b{display:block;font-size:34px;font-weight:680;letter-spacing:-.03em;
+  font-variant-numeric:tabular-nums;line-height:1.05}
+.fnum span{font-size:12.5px;color:var(--ink-3)}
+.caveat{margin-top:18px;padding-top:16px;border-top:1px solid var(--line);
+  font-size:13px;color:var(--ink-2);max-width:74ch}
+.caveat b{color:var(--ink)}
+
+.gate{background:var(--surface);border:1px solid var(--line);border-radius:10px;margin-bottom:9px}
+.gate-h{display:flex;align-items:baseline;gap:13px;padding:14px 16px;width:100%;
+  background:none;border:0;text-align:left;cursor:pointer}
+.gate-h:hover{background:var(--sunk)}
+.gate-name{font-weight:600;font-size:14.5px}
+.gate-n{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--ink-2);font-size:13.5px}
+.gate-body{padding:0 16px 18px;display:none}
+.gate[data-open="1"] .gate-body{display:block}
+.quote{border-left:3px solid var(--stop-line);background:var(--stop-soft);
+  padding:9px 12px;border-radius:0 6px 6px 0;margin:9px 0;
+  font-family:var(--mono);font-size:12px;line-height:1.55;color:#4a2b25;
+  white-space:pre-wrap;word-break:break-word}
+.noquote{border-left:3px solid var(--line-strong);background:var(--sunk);
+  padding:9px 12px;border-radius:0 6px 6px 0;margin:9px 0;font-size:12.5px;color:var(--ink-2)}
+.noquote b{color:var(--ink)}
+.ex-title{font-size:13px;font-weight:600;margin-top:14px}
+.ex-co{font-size:12.5px;color:var(--ink-3)}
+.flag{background:none;border:1px solid var(--line-strong);border-radius:5px;
+  padding:3px 9px;font-size:11.5px;color:var(--ink-2);cursor:pointer;margin-top:5px}
+.flag[aria-pressed="true"]{background:var(--warn-soft);border-color:var(--warn-line);
+  color:var(--warn);font-weight:600}
+footer{max-width:1100px;margin:40px auto 0;padding:22px 28px;border-top:1px solid var(--line);
+  color:var(--ink-3);font-size:12.5px}
+footer p{margin:0 0 8px;max-width:80ch}
+@media (max-width:720px){
+  .wrap,.head{padding-left:16px;padding-right:16px}
+  .detail{padding-left:16px}
+  .zero-n{font-size:44px}
+  .flabel{min-width:0}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<a class="skip" href="#main">Skip to the worklist</a>
+
+<header>
+  <div class="head">
+    <div class="brand">career&#8209;copilot <span>· worklist</span></div>
+    <nav aria-label="Views">
+      <button id="nav-today" aria-current="page">Worklist</button>
+      <button id="nav-evidence">Why things were dropped</button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap" id="main">
+  <div id="source-banner"></div>
+  <section id="view-today" class="today"></section>
+  <section id="view-evidence" hidden></section>
+</main>
+
+<footer>
+  <p>Roles come straight from company applicant-tracking systems — Greenhouse, Ashby, Lever,
+  Workable, Workday. Nothing here applies, submits, or fills anything on your behalf.</p>
+  <p>Internships and co-ops are listed in their own section and are never counted as
+  full-time openings. They are kept apart because they are a different job with a
+  different offer — and kept at all because some new-grad pipelines run through them.</p>
+  <p>There is deliberately no match percentage. A role is either eligible or it is not —
+  eligibility is pass/fail and is never scored — and the fit score is only ever shown as the
+  set of things the posting named, counted against the posting's own list.</p>
+</footer>
+
+<script>
+/* ===========================================================================
+   career-copilot worklist UI.
+
+   One template, two builds, two data paths.
+
+   * Data path. The primary source is an API, and which one depends on the build.
+     ``BOOT.apiPublic`` false is the local build: the authenticated routes in
+     ``copilot.handlers.worklist_api`` (GET /worklist, /internships, /worklist/{id},
+     /excluded, POST /applied) with a bearer token. ``BOOT.apiPublic`` true is the
+     published page: the same reads under the ``/public`` prefix served by
+     ``copilot.handlers.public_api``, unauthenticated and read-only — no POST exists
+     on that API, and ``postApplied`` refuses to run at all in this mode.
+
+     The fallback, in both builds, is the snapshot baked in below at build time. It
+     is what a visitor sees when the API is unreachable — a blocked network, a
+     corporate proxy, a cold or throttled endpoint — and it is why this page still
+     works with the network unplugged. ``pickSource`` probes once and says, in the
+     banner, which source you got, why, and how old it is. It never swaps sources
+     mid-session: page 2 of a different dataset would repeat or skip rows.
+
+   * Internships are a second collection, not a filter and not a subset. The
+     worklist is full-time roles only; internships come from their own route into
+     their own collapsed section, rendered with the same card component so they are
+     scored and dated identically, and marked on every row so they cannot be
+     mistaken for a full-time opening. They are never merged into ``state.rows``.
+
+   * The score is never a bare number. The wire carries a 0-100 ``total`` field and
+     this file deliberately never renders it — a 0-100 weighted number reads as a match
+     percentage no matter how it is labelled, and the whole argument in
+     ``domain/gap.py`` is that those numbers are incomparable. What is rendered is
+     the tier name plus the components: covered/named required, covered/named
+     preferred, and whether the level was confirmed. ``build_ui.py`` greps this file
+     for a read of the score's ``total`` and fails the build if it finds one — which
+     is why not even a comment here may spell that property access out.
+
+   * Age is shown, never hidden. There is no default age window. The user wants a
+     role that has been open since February — or since 2013 — to stay findable, so
+     age is a visible column and an opt-in filter with an "older than" direction.
+   =========================================================================== */
+
+const BOOT = __BOOT__;
+const SNAP = BOOT.snapshot;
+
+const PAGE_SIZE_SNAPSHOT = 50;   // rows appended per click on the baked snapshot
+const PAGE_SIZE_API = 100;       // MAX_LIMIT in worklist_api; a bigger ask is a 400
+const PAGE_SIZE_INTERNSHIPS = 25; // the whole collection is ~48 rows; two clicks, not one
+const PROBE_TIMEOUT_MS = 8000;
+const EXACT_PREVIEW = 6;         // exact-match rows shown before "see all"
+const OLD_POSTING_DAYS = 365;    // when a row starts carrying an "old" marker
+
+const DAY_MS = 86400000;
+
+/* ── tiny DOM + text helpers ───────────────────────────────────────────── */
+const fmt = n => Number(n || 0).toLocaleString('en-US');
+const el = (tag, cls, txt) => { const n = document.createElement(tag);
+  if (cls) n.className = cls; if (txt != null) n.textContent = txt; return n; };
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const clear = node => { while (node.firstChild) node.removeChild(node.firstChild); };
+
+let uid = 0;
+const nextId = prefix => prefix + '-' + (++uid);
+
+/* ── age ───────────────────────────────────────────────────────────────── */
+function ageDays(iso){
+  if (!iso) return null;
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return null;   // a source with a date we cannot read
+  return (Date.now() - then) / DAY_MS;
+}
+
+/** Relative age in words. "undated" is a real state: some boards ship no date. */
+function ageLabel(iso){
+  const d = ageDays(iso);
+  if (d === null) return 'undated';
+  if (d < 1) return 'today';
+  if (d < 2) return 'yesterday';
+  if (d < 14) return Math.floor(d) + 'd ago';
+  if (d < 60) return Math.floor(d / 7) + 'w ago';
+  if (d < 365) return Math.floor(d / 30) + 'mo ago';
+  const years = d / 365;
+  return (years < 2 ? '1y ago' : Math.floor(years) + 'y ago');
+}
+
+function absDate(iso){
+  if (!iso) return 'no date from this source';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return 'unreadable date: ' + iso;
+  return new Date(t).toLocaleDateString('en-US',
+    { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+/* ── vocabularies mirrored from the backend ────────────────────────────── */
+const GATE_LABEL = {
+  not_a_software_role: 'Not a software engineering role',
+  ats_vendor_demo_board: 'An ATS vendor’s demo board, not an employer',
+  internship_not_full_time: 'An internship or co-op, not a full-time opening',
+  wrong_seniority_band: 'Wrong seniority band',
+  citizenship_or_itar_restricted: 'Citizenship or ITAR restricted',
+  security_clearance_required: 'Security clearance required',
+  employer_will_not_sponsor: 'Employer states it will not sponsor',
+};
+
+/* These gates fire on a title, an employment-type field, or a seniority marker —
+   not on a sentence of prose that states a policy. The API does return evidence for
+   all of them, so the old blanket "no sentence quoted" claim was wrong — but the
+   evidence is a *title*, a "5+ years" fragment or an ATS enum value, and presenting
+   that as a quoted policy would overstate it. So the honest thing is to label what
+   kind of evidence it is, per gate. */
+const NON_POLICY_GATES = new Set([
+  'not_a_software_role', 'ats_vendor_demo_board', 'internship_not_full_time',
+  'wrong_seniority_band',
+]);
+
+/* What the evidence under each of those gates actually is. Keyed rather than
+   branched so a new gate lands in the map instead of in an if-chain. */
+const EVIDENCE_KIND = {
+  not_a_software_role:
+    '<b>The quote below is the job title, not a sentence from the description.</b> '
+    + 'This gate reads titles, so of the gates it is the one you are trusting rather '
+    + 'than verifying against a stated policy.',
+  ats_vendor_demo_board:
+    '<b>The evidence below is the board’s own name, not a sentence.</b> These are an '
+    + 'applicant-tracking vendor’s demo fixtures — invented roles, some dated 2013, '
+    + 'which screen exactly like real ones because structurally they are real postings.',
+  internship_not_full_time:
+    '<b>The evidence below is either a phrase in the title or the board’s '
+    + 'employment-type field</b> — the two disagree often, so each row shows whichever '
+    + 'one fired. Software internships that pass every other gate are listed in the '
+    + 'Internships section on the worklist, not dropped.',
+  wrong_seniority_band:
+    '<b>The quote below is the seniority marker, not a policy sentence.</b> It is '
+    + 'either the phrase in the title or the years-of-experience line in the '
+    + 'description — each row says which.',
+};
+
+const TIERS = [
+  { key: 'exact match', label: 'Exact match', cls: 'tier-exact' },
+  { key: 'strong',      label: 'Strong',      cls: 'tier-strong' },
+  { key: 'partial',     label: 'Partial',     cls: 'tier-partial' },
+  { key: 'weak',        label: 'Weak',        cls: 'tier-weak' },
+  { key: 'unscored',    label: 'Unscored',    cls: 'tier-unscored' },
+];
+const TIER_BY_KEY = new Map(TIERS.map(t => [t.key, t]));
+const TIER_RANK = new Map(TIERS.map((t, i) => [t.key, i]));
+
+const LEVELS = [
+  { key: 'entry',   label: 'Entry' },
+  { key: 'intern',  label: 'Intern' },
+  { key: 'unknown', label: 'Level unverified' },
+];
+
+const UNSCORED_WHY = {
+  description_not_provided:
+    'Not scored: this board returns no description, so there was nothing to read requirements out of.',
+  no_technologies_named:
+    'Not scored: the description names no technology this vocabulary recognises. That is about a seventh of real postings — it is not a low score, it is no signal.',
+};
+
+/* Age bands. ``within`` maps to postedAfter, ``older`` to postedBefore — the same
+   two parameters the API takes, so a chip means exactly one query. */
+const AGE_BANDS = [
+  { key: 'any',    label: 'Any age',        mode: 'any' },
+  { key: 'd1',     label: 'Last 24 hours',  mode: 'within', days: 1 },
+  { key: 'd7',     label: 'Last 7 days',    mode: 'within', days: 7 },
+  { key: 'd30',    label: 'Last 30 days',   mode: 'within', days: 30 },
+  { key: 'd90',    label: 'Last 90 days',   mode: 'within', days: 90 },
+  { key: 'd180',   label: 'Last 6 months',  mode: 'within', days: 180 },
+  { key: 'o180',   label: 'Older than 6 months', mode: 'older', days: 180 },
+  { key: 'o365',   label: 'Older than a year',   mode: 'older', days: 365 },
+];
+const AGE_BY_KEY = new Map(AGE_BANDS.map(b => [b.key, b]));
+
+/* ===========================================================================
+   Filters. One object, two consumers: the API turns it into a query string, the
+   snapshot turns it into a predicate. Both are written from the same fields so
+   the two paths cannot drift into filtering differently.
+   =========================================================================== */
+
+function emptyFilters(){
+  return { tiers: [], levels: [], sources: [], age: 'any', q: '' };
+}
+
+function ageWindow(key){
+  const band = AGE_BY_KEY.get(key);
+  if (!band || band.mode === 'any') return { after: null, before: null };
+  const edge = new Date(Date.now() - band.days * DAY_MS).toISOString();
+  return band.mode === 'within' ? { after: edge, before: null }
+                                : { after: null, before: edge };
+}
+
+function filtersActive(f){
+  return f.tiers.length > 0 || f.levels.length > 0 || f.sources.length > 0
+    || f.age !== 'any' || f.q.trim() !== '';
+}
+
+/** Free-text match. Client-side in both paths: the API has no text search. */
+function passesQuery(item, q){
+  const needle = q.trim().toLowerCase();
+  if (!needle) return true;
+  const hay = [item.title, item.company, item.location, item.ats]
+    .filter(Boolean).join(' ').toLowerCase();
+  return hay.includes(needle);
+}
+
+/** The snapshot-side mirror of ``worklist_api._matches`` plus the tier filter.
+    Field order matters: level and source are checked before the date, so an
+    undated row still has to pass them — same as the server. */
+function passesFilters(item, f){
+  if (f.levels.length && !f.levels.includes(item.level)) return false;
+  if (f.sources.length && !f.sources.includes(String(item.ats || '').toLowerCase())) {
+    return false;
+  }
+  const { after, before } = ageWindow(f.age);
+  const stamp = item.postedAt ? Date.parse(item.postedAt) : NaN;
+  if (Number.isNaN(stamp)) {
+    // Undated: in when there is no window, out when there is. An undated posting
+    // cannot honestly be claimed to fall inside a date range.
+    if (after !== null || before !== null) return false;
+  } else {
+    if (after !== null && stamp < Date.parse(after)) return false;
+    if (before !== null && stamp > Date.parse(before)) return false;
+  }
+  if (f.tiers.length) {
+    const tier = item.score ? item.score.tier : null;
+    if (tier === null || !f.tiers.includes(tier)) return false;
+  }
+  return passesQuery(item, f.q);
+}
+
+/* ===========================================================================
+   Sources. Same five methods, so every renderer below is source-agnostic.
+   =========================================================================== */
+
+class SourceError extends Error {
+  constructor(message, code){ super(message); this.code = code || null; }
+}
+
+/** The baked snapshot. Cursors are numeric offsets: the whole set is in memory,
+    so there is no closing-row hazard for keyset paging to protect against. */
+function snapshotSource(reason){
+  // Both collections are indexed: a detail read has to find an internship by id too,
+  // and the id spaces are disjoint by construction (build_ui.py asserts it).
+  const byId = new Map(SNAP.items.concat(SNAP.internships).map(item => [item.id, item]));
+  /* One pager over either array. The two collections page independently — separate
+     cursors, separate counts — because they are separate populations: "12 of 48" and
+     "50 of 813" are answers to different questions. */
+  const pageOf = (rows, { filters, cursor, limit }) => {
+    const matched = rows.filter(item => passesFilters(item, filters));
+    const start = cursor ? Number(cursor) : 0;
+    const window = matched.slice(start, start + limit);
+    const end = start + window.length;
+    return Promise.resolve({
+      items: window,
+      matched: matched.length,
+      eligibleTotal: SNAP.eligibleTotal,
+      nextCursor: end < matched.length ? String(end) : null,
+    });
+  };
+  return {
+    kind: 'snapshot',
+    reason,
+    generatedAt: SNAP.generatedAt,
+    builtAt: BOOT.builtAt,
+    held: SNAP.itemCount,
+    eligibleTotal: SNAP.eligibleTotal,
+    internshipTotal: SNAP.internshipTotal,
+    internshipGateCount: SNAP.internshipGateCount,
+    funnel: SNAP.funnel,
+    scoring: SNAP.scoring,
+    facets: SNAP.facets,
+    prosePublished: SNAP.prosePublished !== false,
+    canRecordApplied: false,
+    pageSize: PAGE_SIZE_SNAPSHOT,
+    worklist(query){ return pageOf(SNAP.items, query); },
+    internships(query){ return pageOf(SNAP.internships, query); },
+    posting(id){
+      const found = byId.get(id);
+      return found ? Promise.resolve(found)
+                   : Promise.reject(new SourceError('not in this snapshot', 'not_in_snapshot'));
+    },
+    excluded(){ return Promise.resolve(SNAP.excluded); },
+    excludedPage(){
+      return Promise.reject(new SourceError('the snapshot cannot page', 'snapshot_cannot_page'));
+    },
+    recordApplied(){
+      return Promise.reject(new SourceError('recording needs the API', 'no_api'));
+    },
+  };
+}
+
+function bearerToken(){
+  // sessionStorage throws outright in some privacy modes, so never let it break boot.
+  try { return sessionStorage.getItem('ccToken'); } catch (_) { return null; }
+}
+
+/** One API URL.
+
+    ``BOOT.apiPrefix`` is "" for the authenticated routes and "/public" for the
+    unauthenticated ones, so every call site below writes the logical path ("/worklist")
+    and the build decides which API it lands on. Prefixing here rather than at each
+    call site is what stops one forgotten path from reading an authenticated route from
+    the published page — which would 401, fall back to the snapshot, and look like the
+    API being down. */
+function apiUrl(path, params){
+  const url = new URL((BOOT.apiBase || '') + (BOOT.apiPrefix || '') + path,
+    window.location.href);
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== null && value !== undefined && value !== '') {
+      url.searchParams.set(key, String(value));
+    }
+  });
+  return url.toString();
+}
+
+async function apiGet(path, params, timeoutMs){
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs || 20000);
+  let response;
+  try {
+    const headers = { 'Accept': 'application/json' };
+    const token = bearerToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    // No ``credentials: 'include'``. The API answers
+    // ``Access-Control-Allow-Origin: *``, and a browser refuses a credentialed
+    // cross-origin request against a wildcard origin — so asking for cookies would
+    // break every cross-origin read to buy an auth mechanism this API does not use.
+    response = await fetch(apiUrl(path, params), { headers, signal: controller.signal });
+  } catch (err) {
+    throw new SourceError('the API could not be reached', 'unreachable');
+  } finally {
+    window.clearTimeout(timer);
+  }
+  let body = null;
+  try { body = await response.json(); } catch (_) { body = null; }
+  if (!response.ok) {
+    throw new SourceError(
+      'the API answered ' + response.status,
+      (body && body.error) ? body.error : 'http_' + response.status);
+  }
+  return body;
+}
+
+/** Query parameters for one filter set.
+
+    Values are comma-joined rather than repeated: API Gateway's HTTP API collapses
+    duplicate parameters and only the REST API exposes them in
+    ``multiValueQueryStringParameters``, while ``_query_values`` splits every value
+    on commas. Joining therefore works through both gateways. No tier, level or
+    ats value contains a comma — ``exact match`` contains a space, which
+    ``searchParams`` encodes safely. */
+function apiParams(filters, cursor, limit){
+  const { after, before } = ageWindow(filters.age);
+  const params = { limit: String(limit) };
+  if (filters.tiers.length) params.tier = filters.tiers.join(',');
+  if (filters.levels.length) params.level = filters.levels.join(',');
+  if (filters.sources.length) params.ats = filters.sources.join(',');
+  if (after) params.postedAfter = after;
+  if (before) params.postedBefore = before;
+  // Sent explicitly rather than left to the server default, so the wire says the
+  // same thing the chip says.
+  params.includeUndated = (after || before) ? 'false' : 'true';
+  if (cursor) params.cursor = cursor;
+  return params;
+}
+
+/** The **only** write this page can make, and the only place a non-GET is issued.
+
+    The guard is the mechanism, not a courtesy. Both builds ship this same file, so
+    "the published page does not contain the write" is not available as a defence:
+    what makes it unreachable is that ``BOOT.apiPublic`` is baked true there and this
+    throws before touching the network. ``build_ui.py`` asserts that there is exactly
+    one POST in the rendered page and that this guard sits inside the function
+    performing it — a check that exists because the failure is silent: an anonymous
+    visitor never clicks "Record that I applied", so a missing guard would surface only
+    when it mattered, and *which roles he applied to is private*. */
+async function postApplied(id){
+  if (BOOT.apiPublic) throw new SourceError('this page is read-only', 'read_only');
+  const url = apiUrl('/applied', {});
+  const headers = { 'Content-Type': 'application/json' };
+  const token = bearerToken();
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  let response;
+  try {
+    response = await fetch(url, {
+      method: 'POST', headers, body: JSON.stringify({ postingId: id }),
+    });
+  } catch (err) {
+    throw new SourceError('the API could not be reached', 'unreachable');
+  }
+  let body = null;
+  try { body = await response.json(); } catch (_) { body = null; }
+  if (!response.ok) {
+    throw new SourceError('the API answered ' + response.status,
+      (body && body.error) ? body.error : 'http_' + response.status);
+  }
+  return body;
+}
+
+/** The reads. Identical on both APIs — ``apiUrl`` adds the ``/public`` prefix when the
+    build is the published one — so there is one implementation and not two that drift.
+
+    ``head`` is the probe response, which carries the totals and the funnel for the
+    whole corpus, so the page can label its sections before loading any rows. */
+function apiSource(head){
+  return {
+    kind: 'api',
+    reason: null,
+    public: BOOT.apiPublic === true,
+    generatedAt: head.generatedAt,
+    builtAt: BOOT.builtAt,
+    held: null,
+    eligibleTotal: head.eligibleTotal,
+    internshipTotal: head.internshipTotal,
+    internshipGateCount: (head.funnel && head.funnel.gates)
+      ? head.funnel.gates.internship_not_full_time : null,
+    funnel: head.funnel,
+    scoring: head.scoring,
+    // Facet counts would describe the baked snapshot, not the live corpus, so the
+    // API path shows chips without numbers rather than numbers that are stale.
+    facets: null,
+    // The public API publishes no description prose and stamps every payload with that
+    // fact; the authenticated one returns the whole description on a detail read.
+    prosePublished: head.prosePublished !== false,
+    // Recording needs an authenticated POST, which the public API does not have at
+    // all. Said here so the button is disabled with a reason rather than offered and
+    // then refused by the guard in ``postApplied``.
+    canRecordApplied: BOOT.apiPublic !== true,
+    pageSize: PAGE_SIZE_API,
+    async worklist(query){ return await collectionPage('/worklist', query); },
+    async internships(query){ return await collectionPage('/internships', query); },
+    async posting(id){
+      const body = await apiGet('/worklist/' + encodeURIComponent(id));
+      return body.posting;
+    },
+    async excluded(){
+      return await apiGet('/excluded', { limit: '10' });
+    },
+    async excludedPage(gate, cursor){
+      const body = await apiGet('/excluded', { gate, limit: '25', cursor: cursor || '' });
+      return body.groups[0];
+    },
+    async recordApplied(id){ return await postApplied(id); },
+  };
+}
+
+/** One page of one collection. Both list routes answer the same shape, which is why
+    ``/internships`` needed no second reader — and why its cursor is kept separate:
+    the API folds the collection name into the cursor fingerprint and refuses a
+    foreign one with ``cursor_filter_mismatch`` rather than paging into the middle of
+    a list it was never taken from. */
+async function collectionPage(path, { filters, cursor, limit }){
+  const page = await apiGet(path, apiParams(filters, cursor, limit));
+  return {
+    items: page.items,
+    matched: page.matched,
+    eligibleTotal: page.eligibleTotal,
+    nextCursor: page.page.nextCursor,
+  };
+}
+
+/** Decide once, at boot, which source this session reads.
+
+    Every failure mode lands on the snapshot with a reason the banner spells out —
+    that is the whole point of still baking one in. ``apiBase === null`` means this
+    build was published with no live path (``--no-public-api``), so fetch is never
+    called at all. */
+async function pickSource(){
+  if (BOOT.apiBase === null) return snapshotSource('no_api_configured');
+  try {
+    const head = await apiGet('/worklist', { limit: '1' }, PROBE_TIMEOUT_MS);
+    return apiSource(head);
+  } catch (err) {
+    const code = err instanceof SourceError ? err.code : 'unreachable';
+    return snapshotSource(code);
+  }
+}
+
+const REASON_TEXT = {
+  no_api_configured:
+    'This build was published with no live path, so it reads only what it was built with.',
+  unauthorized:
+    'The API refused the request as unauthenticated, so nothing live could be read.',
+  unreachable:
+    'The API did not answer — it may be down, or a network in the way may be blocking '
+    + 'it — so nothing live could be read.',
+  store_unavailable:
+    'The API answered but could not read its store, so nothing live could be read.',
+  // Both come from handlers/public_api.py and both mean the fault is ours, not the
+  // visitor's: the projection refused to publish a payload it no longer recognised, or
+  // the public route lost the principal it hands the read path. Named rather than
+  // shown as a bare code, because "the page is stale because we broke the API" is a
+  // different fact from "the API is down".
+  public_projection_failed:
+    'The API refused to publish its own response because the payload no longer matched '
+    + 'what this page is allowed to show — a fault on our side, not yours.',
+  public_route_misconfigured:
+    'The public read route is misconfigured, which is a fault on our side, not yours.',
+  read_only: 'This page is read-only.',
+  snapshot_cannot_page: 'The snapshot holds a fixed number of rows per gate.',
+};
+const reasonText = code => REASON_TEXT[code]
+  || ('The API could not be used (' + (code || 'unknown reason') + ').');
+
+/* ===========================================================================
+   State
+   =========================================================================== */
+
+const state = {
+  source: null,
+  filters: emptyFilters(),
+  rows: [],
+  matched: 0,
+  cursor: null,
+  loading: false,
+  error: null,
+  sortByFit: false,
+  hidden: new Set(),     // "not for me", this session only — never written anywhere
+  applied: new Map(),    // id -> recorded | error text
+};
+
+/* ===========================================================================
+   Badges + the score block
+   =========================================================================== */
+
+function levelBadge(item){
+  const level = item.level || 'unknown';
+  const word = level === 'unknown' ? 'level unverified' : level;
+  const badge = el('span', 'lvl lvl-' + level, word);
+  badge.title = item.levelWhy || '';
+  return badge;
+}
+
+function tierBadge(score){
+  const meta = TIER_BY_KEY.get(score.tier);
+  return el('span', 'tier ' + (meta ? meta.cls : 'tier-unscored'),
+    meta ? meta.label : score.tier);
+}
+
+function ageBadge(item){
+  const days = ageDays(item.postedAt);
+  if (days === null || days < OLD_POSTING_DAYS) return null;
+  const badge = el('span', 'aged', ageLabel(item.postedAt).replace(' ago', ' old'));
+  badge.title = 'Posted ' + absDate(item.postedAt)
+    + ' — still listed as open, but old listings are often stale.';
+  return badge;
+}
+
+function tokenList(names, kind){
+  const wrap = el('div', 'toks');
+  names.forEach(name => wrap.append(el('span', 'tok tok-' + kind, name)));
+  return wrap;
+}
+
+/** The score as components. The wire's ``total`` is never read here — see the header. */
+function scoreBlock(score){
+  const box = el('div', 'score');
+  const top = el('div', 'score-top');
+  top.append(tierBadge(score));
+  // ``explain()`` is the backend's own sentence: "covers 6/6 required · 3/4
+  // preferred · level confirmed". Rendered verbatim so the page and the API can
+  // never describe the same posting differently.
+  top.append(el('span', 'score-line', score.explain));
+  box.append(top);
+
+  if (score.tier === 'unscored') {
+    box.append(el('div', 'note',
+      UNSCORED_WHY[score.unscoredReason]
+      || 'Not scored, and the reason was not reported.'));
+    return box;
+  }
+
+  [['required', 'Required', score.required], ['preferred', 'Preferred', score.preferred]]
+    .forEach(([, label, part]) => {
+      if (!part.total) return;
+      const comp = el('div', 'comp');
+      comp.append(el('div', 'comp-h',
+        label + ' — ' + part.covered + ' of ' + part.total + ' this posting names'));
+      if (part.have.length) comp.append(tokenList(part.have, 'have'));
+      if (part.missing.length) comp.append(tokenList(part.missing, 'miss'));
+      box.append(comp);
+    });
+
+  const foot = el('div', 'score-foot');
+  const level = score.levelConfirmed
+    ? 'The level is confirmed from an explicit signal in the posting.'
+    : 'The level is unverified: nothing in the title or the description states one, '
+      + 'so it counts for nothing here.';
+  foot.append(document.createTextNode(
+    'The denominator is this posting’s own list of named technologies, matched against '
+    + 'a fixed vocabulary — not a probability of being hired. ' + level));
+  if (score.resumeVariant && score.resumeVariant !== 'either') {
+    foot.append(el('div', null, 'Résumé to send: ' + score.resumeVariant));
+  }
+  box.append(foot);
+  return box;
+}
+
+/* ===========================================================================
+   One row
+   =========================================================================== */
+
+/* Words a board uses in its employment-type field for something that is not a
+   full-time job. Matched loosely because every ATS spells it differently: "Intern",
+   "Internship", "INTERN", "Co-op", "Temporary", "Part-time". */
+const INTERNSHIP_TYPE = /inter|co-?op|temp|part/i;
+
+/** The line under an internship row's meta, and it has to handle a contradiction.
+
+    The two signals disagree constantly — 27 postings in this corpus carry "intern"
+    only in the title and 22 only in the ATS employment-type field — so a row can say
+    "Software Engineer, Intern" while its board files it as ``FullTime``. Printing that
+    value bare next to "not a full-time opening" reads as a bug in this page. Naming it
+    as the *board's* field, and saying it contradicts the board's own title, is the only
+    version that is both honest and not confusing. */
+function internshipNote(item){
+  const base = 'Internship or co-op — not a full-time opening';
+  const type = String(item.employmentType || '').trim();
+  if (!type) return base;
+  return INTERNSHIP_TYPE.test(type)
+    ? base + ' · the board files it as “' + type + '”'
+    : base + ' · the board files it as “' + type + '”, contradicting its own title';
+}
+
+/** One card. ``opts.internship`` marks the row as belonging to the other collection.
+
+    The same component renders both collections on purpose — same score block, same age
+    column, same evidence — but an internship row must never be mistakable for a
+    full-time opening, so it carries an explicit badge (glyph *and* the word), a line of
+    plain text under the meta row, and a screen-reader label that says so before the
+    title. None of that is colour, and none of it depends on the section it sits in. */
+function buildRow(item, opts){
+  const internship = !!(opts && opts.internship);
+  const row = el('div', 'row');
+  row.dataset.open = '0';
+  row.dataset.id = item.id;
+
+  const bodyId = nextId('detail');
+  const head = el('button', 'row-main');
+  head.setAttribute('aria-expanded', 'false');
+  head.setAttribute('aria-controls', bodyId);
+  if (internship) {
+    head.setAttribute('aria-label',
+      'Internship, not a full-time opening: ' + item.title + ' at ' + item.company);
+  }
+  head.append(el('span', 'caret', '▶'));
+
+  const mid = el('div', 'row-t');
+  const title = el('div', 'row-title');
+  title.append(el('span', null, item.title));
+  if (internship) title.append(el('span', 'tag-intern', 'Internship'));
+  title.append(levelBadge(item));
+  const aged = ageBadge(item);
+  if (aged) title.append(aged);
+  mid.append(title);
+
+  const bits = [item.company, item.location || null,
+    item.remote === true ? 'remote' : null, item.ats].filter(Boolean);
+  mid.append(el('div', 'row-meta', bits.join('  ·  ')));
+  if (internship) mid.append(el('div', 'intern-note', internshipNote(item)));
+
+  if (item.score) {
+    const line = el('div', 'row-score');
+    line.append(tierBadge(item.score));
+    line.append(document.createTextNode('  ' + item.score.explain));
+    mid.append(line);
+  }
+  head.append(mid);
+
+  const right = el('div', 'row-right');
+  const when = el('span', 'row-when', ageLabel(item.postedAt));
+  when.title = 'Posted ' + absDate(item.postedAt);
+  right.append(when);
+  head.append(right);
+
+  const detail = el('div', 'detail');
+  detail.id = bodyId;
+  row.append(head, detail);
+
+  let filled = false;
+  head.addEventListener('click', () => {
+    const open = row.dataset.open === '1';
+    row.dataset.open = open ? '0' : '1';
+    head.setAttribute('aria-expanded', String(!open));
+    if (!open && !filled) { filled = true; fillDetail(detail, item, { internship }); }
+  });
+  return row;
+}
+
+/** Detail is filled on first expand, and the description is fetched then too.
+
+    Both halves matter: 880 rows' worth of prose is not baked in, and on the API
+    path the list endpoint deliberately carries no description at all. */
+function fillDetail(detail, item, opts){
+  clear(detail);
+
+  if (opts && opts.internship) {
+    // Stated in the row's own detail, not only in the section heading: a reader who
+    // arrived here by expanding a row should not have to scroll up to learn that this
+    // is not a full-time opening, or why it is not in the worklist.
+    const note = el('div', 'why');
+    note.innerHTML = '<b>This is an internship or co-op.</b> The worklist holds '
+      + 'full-time openings only, so this one is not in it — the internship gate '
+      + 'removed it, and it is here because it passes every other gate. Some new-grad '
+      + 'pipelines at large employers do run through these, which is why they are '
+      + 'listed rather than dropped.';
+    detail.append(note);
+  }
+
+  const why = el('div', 'why');
+  why.innerHTML = (item.level === 'unknown')
+    ? '<b>Level unverified.</b> ' + esc(item.levelWhy)
+      + ' — it could be a new-grad opening or it could want ten years. Read the requirements '
+      + 'before spending time on it.'
+    : '<b>Read as ' + esc(item.level) + '</b> because ' + esc(item.levelWhy) + '.';
+  detail.append(why);
+
+  detail.append(el('div', 'note',
+    'Posted ' + absDate(item.postedAt) + ' · ' + ageLabel(item.postedAt)
+    + ((ageDays(item.postedAt) || 0) >= OLD_POSTING_DAYS
+      ? ' — the board still lists it as open. Old listings are often stale; the age is '
+        + 'shown rather than filtered out so you can decide.'
+      : '')));
+
+  if (item.score) detail.append(scoreBlock(item.score));
+  else if (state.source.scoring && state.source.scoring.available === false) {
+    detail.append(el('div', 'note',
+      state.source.scoring.reason === 'no_resume_configured'
+        ? 'No fit score: no résumé is configured, and scoring against an empty document '
+          + 'would mark every requirement missing and call it zero.'
+        : 'No fit score in this data (' + state.source.scoring.reason + ').'));
+  }
+
+  const prose = el('div');
+  detail.append(prose);
+  renderProse(prose, item);
+
+  const actions = el('div', 'actions');
+  const open = el('a', 'btn', 'Open the posting ↗');
+  open.href = item.url; open.target = '_blank'; open.rel = 'noopener noreferrer';
+  actions.append(open);
+
+  // Already recorded this session? Say so. A filter change rebuilds every row, and a
+  // button that reverts to "Record that I applied" invites a second POST for
+  // something already done — harmless at the store (``mark_applied`` only writes
+  // where ``applied_at IS NULL``) but misleading on screen.
+  const alreadyRecorded = state.applied.get(item.id) === 'recorded';
+  const applied = el('button', 'btn btn-2',
+    alreadyRecorded ? 'Recorded' : 'Record that I applied');
+  if (alreadyRecorded) applied.disabled = true;
+  else if (!state.source.canRecordApplied) {
+    applied.disabled = true;
+    applied.title = 'Recording needs the API; this page is reading the built-in snapshot.';
+  }
+  const appliedNote = el('span', 'note',
+    alreadyRecorded ? 'recorded earlier in this session — nothing was submitted anywhere' : '');
+  applied.addEventListener('click', async () => {
+    applied.disabled = true;
+    appliedNote.textContent = 'recording…';
+    try {
+      const body = await state.source.recordApplied(item.id);
+      appliedNote.textContent = body.note || 'recorded only — nothing was submitted anywhere';
+      applied.textContent = 'Recorded';
+      state.applied.set(item.id, 'recorded');
+    } catch (err) {
+      applied.disabled = false;
+      appliedNote.textContent = 'could not record: ' + err.message;
+    }
+  });
+  actions.append(applied, appliedNote);
+
+  const dismiss = el('button', 'btn btn-2', 'Not for me');
+  dismiss.title = 'Hides the row for this browser session only. Nothing is written anywhere.';
+  dismiss.addEventListener('click', () => {
+    // Remove the row that was clicked (it may be the copy in the exact-match
+    // section) and then the copy in the main list, so the two cannot disagree.
+    const row = detail.closest('.row');
+    if (row) row.remove();
+    hideRow(item.id);
+  });
+  actions.append(dismiss);
+  detail.append(actions);
+}
+
+/** The description, or an honest account of why there is none.
+
+    Four distinct states, and collapsing any two of them would be a lie:
+    the source never offered one; the source offered one and sent nothing; we hold
+    it; we hold it but will not republish it. */
+function renderProse(host, item){
+  clear(host);
+  if (item.descriptionStatus === 'not_provided_by_source') {
+    host.append(el('div', 'note',
+      'This source returns no description, so only the title was screened — and the '
+      + 'eligibility gates could not run at all.'));
+    return;
+  }
+  if (item.descriptionStatus === 'empty_from_source') {
+    host.append(el('div', 'note',
+      'This source claimed a description and returned nothing in it. That is a data '
+      + 'fault worth seeing, not a role with nothing to say.'));
+    return;
+  }
+  if (typeof item.description === 'string' && item.description) {
+    host.append(el('div', 'desc', item.description));
+    if (item.descriptionTruncated) {
+      host.append(el('div', 'note',
+        'Cut short here'
+        + (item.descriptionChars ? ' — the posting runs to ' + fmt(item.descriptionChars)
+          + ' characters' : '')
+        + '. Open the posting for the whole thing.'));
+    }
+    return;
+  }
+  // Asked of the *source*, not of the baked snapshot: this page can be reading live
+  // from an API that publishes no prose, and reading SNAP's flag there would be right
+  // only by coincidence — and wrong the moment one build's flag stops matching the
+  // other's. Both sources declare it.
+  if (item.descriptionWithheld || state.source.prosePublished === false) {
+    host.append(el('div', 'note',
+      'The description is not republished here'
+      + (item.descriptionChars ? ' (' + fmt(item.descriptionChars) + ' characters' : '')
+      + (item.descriptionChars ? ')' : '')
+      + '. Short quotes stay, because they explain a decision; reprinting 234 companies’ '
+      + 'postings in bulk is a different act. It is one click away on the company’s site.'));
+    return;
+  }
+  // API path: the list row carries no prose, so fetch the detail read on demand.
+  const pending = el('div', 'note', 'loading the description…');
+  host.append(pending);
+  state.source.posting(item.id).then(posting => {
+    Object.assign(item, {
+      description: posting.description,
+      descriptionChars: posting.descriptionChars,
+      descriptionStatus: posting.descriptionStatus,
+      descriptionTruncated: false,
+      screening: posting.screening,
+    });
+    renderProse(host, item);
+  }).catch(err => {
+    pending.textContent = 'The description could not be loaded: ' + err.message + ' ';
+    // Retryable: the detail read is one request against a live API, and a page that
+    // makes you collapse and re-expand the row to try again has simply hidden the
+    // retry — the row is only ever filled once.
+    const again = el('button', 'chip', 'Try again');
+    again.addEventListener('click', () => renderProse(host, item));
+    pending.append(again);
+  });
+}
+
+/* ===========================================================================
+   Worklist view
+   =========================================================================== */
+
+function renderToday(){
+  const view = document.getElementById('view-today');
+  clear(view);
+
+  const fresh = el('div');
+  fresh.id = 'fresh';
+  view.append(fresh);
+  const exact = el('div');
+  exact.id = 'exact';
+  view.append(exact);
+  // Above the worklist, not below it: the worklist loads more rows as you scroll, so a
+  // section underneath it is unreachable in practice. Collapsed, so it costs one row.
+  const interns = el('section', 'intern');
+  interns.id = 'interns';
+  view.append(interns);
+
+  const head = el('div', 'section-head');
+  head.append(el('h2', null, 'All full-time roles'));
+  const count = el('span', 'count');
+  count.id = 'list-count';
+  count.setAttribute('aria-live', 'polite');
+  head.append(count);
+  view.append(head);
+  view.append(filterBar());
+
+  const list = el('div', 'list');
+  list.id = 'rows';
+  view.append(list);
+
+  const tail = el('div');
+  tail.id = 'tail';
+  view.append(tail);
+
+  // The main list first; the two summary sections after, so on the API path the
+  // index is already warm and they are answered from cache rather than each
+  // triggering their own screening pass.
+  reload().then(() => { fillFresh(fresh); fillExact(exact); fillInternships(interns); });
+}
+
+/** Ask whichever source is live one narrow question and hand back its count.
+
+    Both sections below run through the same ``worklist`` call the main list uses,
+    so on the live path they describe the live corpus rather than quietly reporting
+    the baked snapshot underneath a banner that says "Live". */
+function askFor(overrides, limit){
+  return state.source.worklist({
+    filters: Object.assign(emptyFilters(), overrides),
+    cursor: null,
+    limit: limit || state.source.pageSize,
+  });
+}
+
+/** "Posted in the last 24 hours", which is *not* "new to this list".
+
+    The old build claimed the latter. It cannot be claimed from this API: a card
+    carries ``postedAt`` and no first-seen timestamp, so a posting the pipeline saw
+    for the first time this morning is indistinguishable from one it has held for a
+    month. Saying the narrower true thing instead. */
+async function fillFresh(host){
+  clear(host);
+  host.append(el('div', 'eyebrow', 'Posted in the last 24 hours'));
+  const funnel = state.source.funnel;
+  const zero = el('div', 'zero');
+  host.append(zero);
+
+  // One request, not two: ``matched`` is the count for the headline and ``items``
+  // is the first page of the rows underneath it.
+  let page;
+  try {
+    page = await askFor({ age: 'd1' }, Math.min(state.source.pageSize, 25));
+  } catch (err) {
+    zero.append(el('div', 'note', 'Could not count today’s postings: ' + err.message));
+    return;
+  }
+  const count = page.matched;
+
+  zero.append(el('div', 'zero-n', fmt(count)));
+  zero.append(el('div', 'zero-lead', count
+    ? 'Roles the boards stamped within the last day.'
+    : 'Nothing was posted in the last day.'));
+  const body = el('div', 'zero-body');
+  body.innerHTML = count
+    ? 'The rest of the list below is not stale by default — it is the standing backlog of '
+      + 'roles still listed as open, some of them for years. Age is a column and a filter '
+      + 'here, not a hidden cutoff.'
+    : '<b>This is what most mornings look like, and it is the point.</b> All '
+      + fmt(funnel.screened) + ' open roles were read and re-screened; none of them carried '
+      + 'a stamp from the last day. The backlog below is still there to work through.';
+  zero.append(body);
+
+  const run = el('div', 'run');
+  // The internships cell is here so the section is discoverable from the top of the
+  // page, and it is labelled "listed separately" rather than added to "eligible right
+  // now": they are not in that 813 and must not read as though they were.
+  [['Roles screened', fmt(funnel.screened)],
+   ['Full-time and eligible', fmt(funnel.kept)],
+   ['Not applicable to you', fmt(funnel.excluded)],
+   ['Level unverified', fmt(funnel.needsLevelCheck)],
+   // ``== null`` on purpose: an API that has not been redeployed yet answers without
+   // the field at all, and ``fmt(undefined)`` renders a confident "0".
+   ['Internships, listed separately',
+    state.source.internshipTotal == null ? '—' : fmt(state.source.internshipTotal)],
+  ].forEach(([label, value]) => {
+    const cell = el('div');
+    cell.append(el('b', null, value));
+    cell.append(el('span', null, label));
+    run.append(cell);
+  });
+  zero.append(run);
+
+  if (count) {
+    const list = el('div', 'list');
+    page.items.filter(item => !state.hidden.has(item.id))
+      .forEach(item => list.append(buildRow(item)));
+    host.append(list);
+    if (count > page.items.length) {
+      host.append(el('div', 'tail', 'Showing ' + fmt(page.items.length) + ' of them — the '
+        + 'rest are in the list below, where the age filter is “Last 24 hours”.'));
+    }
+  }
+}
+
+/** "Exactly matched to you" — the ``exact match`` tier, and what earns it. */
+async function fillExact(host){
+  clear(host);
+  const scoring = state.source.scoring;
+  const head = el('div', 'section-head');
+  head.append(el('h2', null, 'Exactly matched to you'));
+  const count = el('span', 'count');
+  head.append(count);
+  host.append(head);
+
+  if (!scoring.available) {
+    host.append(el('div', 'blurb',
+      'No roles can be matched: '
+      + (scoring.reason === 'no_resume_configured'
+        ? 'no résumé is configured, so nothing was scored — and scoring against an empty '
+          + 'document would mark every requirement missing and call it zero.'
+        : 'this data carries no scores (' + scoring.reason + ').')));
+    return;
+  }
+
+  const blurb = el('p', 'blurb');
+  blurb.innerHTML = 'A role lands here when <b>every technology it names as required is '
+    + 'already on your résumé</b>, it named at least three of them, and its level is '
+    + 'confirmed from an explicit signal rather than assumed. That is a strict rule, which '
+    + 'is why it is a short list — and it is why there is no percentage: the requirement is '
+    + 'categorical.';
+  host.append(blurb);
+
+  let page;
+  try {
+    page = await askFor({ tiers: ['exact match'] }, Math.max(EXACT_PREVIEW, 25));
+  } catch (err) {
+    host.append(el('div', 'note', 'Could not load the exact matches: ' + err.message));
+    return;
+  }
+  count.textContent = fmt(page.matched) + ' of ' + fmt(page.eligibleTotal) + ' eligible roles';
+
+  const rows = page.items.filter(item => !state.hidden.has(item.id));
+  if (!rows.length) {
+    host.append(el('div', 'note', 'Nothing clears that bar in this data.'));
+    return;
+  }
+  const list = el('div', 'list');
+  rows.slice(0, EXACT_PREVIEW).forEach(item => list.append(buildRow(item)));
+  host.append(list);
+
+  if (page.matched > EXACT_PREVIEW) {
+    const more = el('button', 'more');
+    more.innerHTML = 'See all <b>' + fmt(page.matched)
+      + '</b> exact matches in the list below';
+    more.addEventListener('click', () => {
+      state.filters = Object.assign(emptyFilters(), { tiers: ['exact match'] });
+      renderFilterBar();
+      reload();
+      const rows = document.getElementById('rows');
+      // Guarded rather than called: scrollIntoView is missing in some non-browser
+      // DOMs, and an exception here would abandon the rest of the handler.
+      if (rows && typeof rows.scrollIntoView === 'function') {
+        rows.scrollIntoView({ block: 'start' });
+      }
+    });
+    host.append(more);
+  }
+}
+
+/* ===========================================================================
+   Internships — the second collection
+   =========================================================================== */
+
+/** The internships section: its own heading, its own count, collapsed by default.
+
+    **Why it is separate, and why it exists at all.** ``screen`` gates internships out
+    of the worklist and that stays: the worklist's whole job is to be a short, correct
+    list of full-time openings, and internships crowded it once — 50 got in and 5 ranked
+    *exact match*, which is how the leak was found. But some new-grad pipelines at large
+    employers run through Fall/Summer internship postings that convert, so dropping them
+    entirely lost real openings. They are therefore a *collection*, not a filter: their
+    own route, their own count, their own paging, never merged into ``state.rows``.
+
+    **Why collapsed.** It sits above the worklist rather than below it, because the
+    worklist loads more rows as you scroll and anything underneath it is unreachable in
+    practice. Collapsed, it costs one row of height and one line of explanation, and it
+    does not push the 813 full-time roles down the page.
+
+    **Why the rows load on expand.** One request that nobody asked for, on an endpoint
+    with no authentication in front of it, is the cheap kind of waste to avoid — and the
+    heading's count comes from the probe response, so the section can label itself
+    honestly without reading a single row. */
+function fillInternships(host){
+  clear(host);
+  host.dataset.open = '0';
+  const total = state.source.internshipTotal;
+  const gated = state.source.internshipGateCount;
+  const bodyId = nextId('interns');
+
+  const button = el('button', 'intern-h');
+  button.setAttribute('aria-expanded', 'false');
+  button.setAttribute('aria-controls', bodyId);
+  button.append(el('span', 'caret', '▶'));
+  button.append(el('span', 'intern-title', 'Internships and co-ops'));
+  button.append(el('span', 'count', internshipCountLabel(total, gated)));
+  // The badge repeats in words what the panel's colour says, for the same reason every
+  // other badge on this page does: colour is never the only carrier of meaning.
+  button.append(el('span', 'tag-intern', 'Not full-time'));
+  const heading = el('h2');
+  heading.append(button);
+  host.append(heading);
+
+  const body = el('div', 'intern-body');
+  body.id = bodyId;
+  const why = el('div', 'intern-why');
+  why.innerHTML = '<b>These are not in the worklist above, and they are not counted in '
+    + 'it.</b> The worklist is full-time openings only. They are listed here because '
+    + 'some new-grad pipelines at large employers run through Fall and Summer internship '
+    + 'postings, so a blanket drop loses real openings — but an internship is a '
+    + 'different job with a different offer, and every row below says so.'
+    + internshipReconciliation(total, gated)
+    + ' Every posting that gate removed is browsable under “Why things were dropped”.';
+  body.append(why);
+  host.append(body);
+
+  const list = el('div', 'list');
+  const tail = el('div');
+  body.append(list, tail);
+  const pager = internshipPager(list, tail);
+
+  button.addEventListener('click', () => {
+    const open = host.dataset.open === '1';
+    host.dataset.open = open ? '0' : '1';
+    button.setAttribute('aria-expanded', String(!open));
+    if (!open) pager.start();
+  });
+}
+
+function internshipCountLabel(total, gated){
+  if (total === null || total === undefined) return 'count unavailable in this data';
+  if (!total) return 'none in this data';
+  return fmt(total) + (gated ? ' of ' + fmt(gated) + ' internship postings' : '');
+}
+
+/** The 48-versus-318 sentence, and nothing else — the caller adds its own pointer.
+
+    Both numbers ride in every API response precisely so this can be said out loud: the
+    gate fires on 318 postings and this section holds 48 of them. Without the sentence
+    the section looks like it lost 270 rows; without the filtering it would publish
+    "Marketing Intern" and an ATS vendor's demo fixtures under a software heading.
+
+    Deliberately carries no "see the other view" clause: it is shown in two places, and
+    the exclusion ledger would otherwise tell a reader standing in it to go and look at
+    it. Each caller appends the cross-reference that makes sense where it stands. */
+function internshipReconciliation(total, gated){
+  if (!gated || total === null || total === undefined) return '';
+  const dropped = gated - total;
+  if (dropped <= 0) return '';
+  return ' The internship gate removed ' + fmt(gated) + ' postings; ' + fmt(total)
+    + ' of them are software internships that pass every other gate, and the other '
+    + fmt(dropped) + ' fail one that has nothing to do with being an internship — not a '
+    + 'software role, an ATS vendor’s demo board, or requiring a clearance, citizenship '
+    + 'or no sponsorship.';
+}
+
+/** Paging for the internships section: its own cursor, deliberately.
+
+    A cursor belongs to one collection — the API folds the collection name into its
+    fingerprint and refuses a foreign cursor — and, just as importantly, "12 of 48" and
+    "50 of 813" are answers to different questions. Sharing ``state.cursor`` would make
+    one list's "load more" move the other. */
+function internshipPager(list, tail){
+  let cursor = null;
+  let loaded = 0;
+  let matched = null;
+  let started = false;
+  let busy = false;
+
+  const draw = (error) => {
+    clear(tail);
+    if (error) {
+      const box = el('div', 'err');
+      box.append(el('div', null, 'The internships could not be loaded: ' + error));
+      const retry = el('button', 'chip', 'Try again');
+      retry.addEventListener('click', () => load());
+      box.append(retry);
+      tail.append(box);
+      return;
+    }
+    if (busy) {
+      const busyNote = el('div', 'tail', 'loading…');
+      busyNote.setAttribute('aria-live', 'polite');
+      tail.append(busyNote);
+      return;
+    }
+    if (matched === 0) {
+      tail.append(el('div', 'note pad',
+        'No software internship in this data passes the other gates.'));
+      return;
+    }
+    if (cursor === null) {
+      if (loaded) tail.append(el('div', 'tail', 'That is all ' + fmt(loaded) + '.'));
+      return;
+    }
+    const more = el('button', 'more');
+    more.innerHTML = 'Load more internships — showing <b>' + fmt(loaded) + '</b> of '
+      + fmt(matched);
+    more.addEventListener('click', () => load());
+    tail.append(more);
+  };
+
+  async function load(){
+    if (busy) return;
+    busy = true;
+    draw(null);
+    try {
+      const page = await state.source.internships({
+        filters: emptyFilters(), cursor,
+        limit: Math.min(state.source.pageSize, PAGE_SIZE_INTERNSHIPS),
+      });
+      page.items.filter(item => !state.hidden.has(item.id))
+        .forEach(item => list.append(buildRow(item, { internship: true })));
+      loaded += page.items.length;
+      matched = page.matched;
+      cursor = page.nextCursor;
+      busy = false;
+      draw(null);
+    } catch (err) {
+      busy = false;
+      draw(err.message + (err.code ? ' (' + err.code + ')' : ''));
+    }
+  }
+
+  return {
+    start(){
+      if (started) return;
+      started = true;
+      load();
+    },
+  };
+}
+
+/* ── the filter bar ────────────────────────────────────────────────────── */
+
+function filterBar(){
+  const bar = el('div', 'filters');
+  bar.id = 'filter-bar';
+  renderFilterBar(bar);
+  return bar;
+}
+
+/** Facet counts are shown only when they were tallied over the rows on offer.
+
+    The old export shipped counts tallied over a different population than the
+    rows it held, so a chip could claim 183 entry-level roles above a list of 12.
+    On the API path the snapshot's counts would be describing different data
+    altogether, so the chips go out without numbers. */
+function facetCount(group, key){
+  const facets = state.source.facets;
+  if (!facets) return null;
+  const bucket = facets[group];
+  if (!bucket) return null;
+  return bucket[key] === undefined ? 0 : bucket[key];
+}
+
+function chipFor(label, count, pressed, onClick, disabled){
+  const chip = el('button', 'chip');
+  chip.append(document.createTextNode(label));
+  if (count !== null && count !== undefined) chip.append(el('span', 'n', fmt(count)));
+  chip.setAttribute('aria-pressed', String(!!pressed));
+  if (disabled) chip.disabled = true;
+  else chip.addEventListener('click', onClick);
+  return chip;
+}
+
+function toggleIn(list, value){
+  const at = list.indexOf(value);
+  if (at === -1) list.push(value); else list.splice(at, 1);
+}
+
+function renderFilterBar(host){
+  const bar = host || document.getElementById('filter-bar');
+  if (!bar) return;
+  clear(bar);
+  const scoring = state.source.scoring;
+
+  const rowFor = (label, chips) => {
+    const row = el('div', 'frow');
+    row.append(el('div', 'flabel', label));
+    const box = el('div', 'chips');
+    chips.forEach(chip => box.append(chip));
+    row.append(box);
+    return row;
+  };
+
+  // Fit tier. Refused rather than ignored when there is no résumé — the API
+  // answers ``scoring_unavailable`` for the same request, so the chip is disabled
+  // instead of firing a query that 400s.
+  bar.append(rowFor('Fit', TIERS.map(tier => chipFor(
+    tier.label, facetCount('tiers', tier.key),
+    state.filters.tiers.includes(tier.key),
+    () => { toggleIn(state.filters.tiers, tier.key); renderFilterBar(); reload(); },
+    !scoring.available))));
+
+  bar.append(rowFor('Level', LEVELS.map(level => chipFor(
+    level.label, facetCount('levels', level.key),
+    state.filters.levels.includes(level.key),
+    () => { toggleIn(state.filters.levels, level.key); renderFilterBar(); reload(); }))));
+
+  const sources = state.source.facets
+    ? Object.keys(state.source.facets.sources).sort()
+    : ['greenhouse', 'ashby', 'lever', 'workable', 'workday'];
+  bar.append(rowFor('Board', sources.map(name => chipFor(
+    name, facetCount('sources', name),
+    state.filters.sources.includes(name),
+    () => { toggleIn(state.filters.sources, name); renderFilterBar(); reload(); }))));
+
+  bar.append(rowFor('Age', AGE_BANDS.map(band => chipFor(
+    band.label, ageBandCount(band),
+    state.filters.age === band.key,
+    () => { state.filters.age = band.key; renderFilterBar(); reload(); }))));
+
+  const search = el('div', 'search');
+  const input = el('input');
+  input.type = 'search';
+  input.value = state.filters.q;
+  input.placeholder = 'Filter by title, company, location or board';
+  input.setAttribute('aria-label', 'Filter roles by text');
+  let timer = 0;
+  input.addEventListener('input', () => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => { state.filters.q = input.value; reload(); }, 180);
+  });
+  search.append(input);
+  if (state.source.kind === 'api') {
+    search.append(el('span', 'search-note',
+      'text filtering happens in the browser, over the rows loaded so far'));
+  }
+  bar.append(search);
+
+  const foot = el('div', 'frow');
+  const sort = el('button', 'chip', state.sortByFit ? 'Sorted: best fit first'
+                                                    : 'Sorted: newest first');
+  sort.setAttribute('aria-pressed', String(state.sortByFit));
+  sort.disabled = !scoring.available;
+  sort.addEventListener('click', () => {
+    state.sortByFit = !state.sortByFit;
+    renderFilterBar();
+    renderRows();
+  });
+  foot.append(sort);
+  if (state.sortByFit && state.source.kind === 'api') {
+    foot.append(el('span', 'search-note',
+      'reorders the rows loaded so far — the API serves newest first'));
+  }
+  if (filtersActive(state.filters)) {
+    const reset = el('button', 'reset', 'Clear all filters');
+    reset.addEventListener('click', () => {
+      state.filters = emptyFilters();
+      renderFilterBar();
+      reload();
+    });
+    foot.append(reset);
+  }
+  bar.append(foot);
+}
+
+/** Count for one age chip, from the snapshot, when the snapshot is the source. */
+function ageBandCount(band){
+  if (!state.source.facets) return null;
+  if (band.mode === 'any') return SNAP.itemCount;
+  const edge = Date.now() - band.days * DAY_MS;
+  let n = 0;
+  for (const item of SNAP.items) {
+    const stamp = item.postedAt ? Date.parse(item.postedAt) : NaN;
+    if (Number.isNaN(stamp)) continue;
+    if (band.mode === 'within' ? stamp >= edge : stamp <= edge) n += 1;
+  }
+  return n;
+}
+
+/* ── loading + paging ──────────────────────────────────────────────────── */
+
+/* Which filter set the rows on screen belong to. Bumped by every reload, and
+   checked when a page comes back: a page that was asked for under the previous
+   filters must be dropped, not appended, or a slow first page arrives after the
+   user has already narrowed and lands in the middle of a different list. */
+let generation = 0;
+
+/** Start a filter set over: drop the rows and the cursor together.
+
+    They have to move together. A keyset cursor is only meaningful inside one
+    ordering — the API embeds a fingerprint of the filter set in it and answers
+    ``cursor_filter_mismatch`` for a foreign one — so reusing a cursor across a
+    filter change would repeat or skip rows.
+
+    ``loading`` is cleared here rather than waited on. An in-flight page belongs to
+    the old generation and will discard itself, and leaving the flag set would make
+    the guard in :func:`loadMore` swallow this reload entirely — filters would go
+    dead until the stale request landed. */
+function reload(){
+  generation += 1;
+  state.rows = [];
+  state.cursor = null;
+  state.matched = 0;
+  state.error = null;
+  state.loading = false;
+  return loadMore();
+}
+
+async function loadMore(){
+  if (state.loading) return;
+  const mine = generation;
+  state.loading = true;
+  state.error = null;
+  renderTail();
+  try {
+    const page = await state.source.worklist({
+      filters: state.filters, cursor: state.cursor, limit: state.source.pageSize,
+    });
+    if (mine !== generation) return;   // answered a question we are no longer asking
+    state.rows = state.rows.concat(page.items.filter(item => !state.hidden.has(item.id)));
+    state.matched = page.matched;
+    state.cursor = page.nextCursor;
+  } catch (err) {
+    if (mine !== generation) return;
+    state.error = err.message + (err.code ? ' (' + err.code + ')' : '');
+  } finally {
+    if (mine === generation) {
+      state.loading = false;
+      renderRows();
+    }
+  }
+}
+
+function visibleRows(){
+  let rows = state.rows.filter(item => !state.hidden.has(item.id)
+    && passesQuery(item, state.filters.q));
+  if (state.sortByFit) {
+    // A copy, so the arrival order from the source is never mutated.
+    rows = rows.slice().sort((a, b) => {
+      const ra = a.score ? TIER_RANK.get(a.score.tier) : 99;
+      const rb = b.score ? TIER_RANK.get(b.score.tier) : 99;
+      if (ra !== rb) return ra - rb;
+      const ca = a.score ? a.score.required.covered : 0;
+      const cb = b.score ? b.score.required.covered : 0;
+      if (ca !== cb) return cb - ca;
+      return (Date.parse(b.postedAt || 0) || 0) - (Date.parse(a.postedAt || 0) || 0);
+    });
+  }
+  return rows;
+}
+
+/** Ids currently in the DOM, in order, so a new page can be appended rather than
+    redrawn. Rebuilding the whole list on every page would collapse every row the
+    reader had expanded — which, on a list you page through, is the row they were
+    reading. */
+let renderedIds = [];
+
+function renderRows(){
+  const list = document.getElementById('rows');
+  if (!list) return;
+  const rows = visibleRows();
+
+  // Append when the rows on screen are still a prefix of the rows to show, which
+  // is the case for every "load more"; rebuild when the order or the set changed,
+  // which is the case for a filter, a search or a sort.
+  const isAppend = rows.length >= renderedIds.length
+    && renderedIds.every((id, at) => rows[at] && rows[at].id === id);
+  const frag = document.createDocumentFragment();
+  if (isAppend) {
+    rows.slice(renderedIds.length).forEach(item => frag.append(buildRow(item)));
+  } else {
+    clear(list);
+    rows.forEach(item => frag.append(buildRow(item)));
+  }
+  list.append(frag);
+  renderedIds = rows.map(item => item.id);
+
+  const empty = list.querySelector('.empty');
+  if (empty) empty.remove();
+  if (!rows.length && !state.loading) {
+    list.append(el('div', 'note pad empty', state.error
+      ? 'Nothing could be loaded.'
+      : 'No role matches these filters. Widening the age band is usually the fix — '
+        + 'most of this list is older than a month.'));
+  }
+  renderCounts();
+  renderTail();
+}
+
+/** Hide one row for this session. Nothing is written anywhere — not the API, not
+    storage — so a reload brings it back, which is the honest behaviour for a
+    judgement the pipeline did not make. */
+function hideRow(id){
+  state.hidden.add(id);
+  const at = renderedIds.indexOf(id);
+  if (at !== -1) renderedIds.splice(at, 1);
+  state.rows = state.rows.filter(item => item.id !== id);
+  const node = document.querySelector('#rows .row[data-id="' + CSS.escape(id) + '"]');
+  if (node) node.remove();
+  renderCounts();
+}
+
+function renderCounts(){
+  const node = document.getElementById('list-count');
+  if (!node) return;
+  const shown = document.querySelectorAll('#rows .row').length;
+  const parts = [fmt(shown) + ' shown'];
+  if (state.matched > shown) parts.push('of ' + fmt(state.matched) + ' matching');
+  if (state.source.eligibleTotal) {
+    parts.push(fmt(state.source.eligibleTotal) + ' eligible in all');
+  }
+  node.textContent = parts.join(' · ');
+}
+
+function renderTail(){
+  const tail = document.getElementById('tail');
+  if (!tail) return;
+  clear(tail);
+  if (state.error) {
+    const box = el('div', 'err');
+    box.append(el('div', null, 'Could not load more rows: ' + state.error));
+    const retry = el('button', 'chip', 'Try again');
+    retry.addEventListener('click', () => loadMore());
+    box.append(retry);
+    tail.append(box);
+    return;
+  }
+  if (state.loading) {
+    const busy = el('div', 'tail', 'loading…');
+    busy.setAttribute('aria-live', 'polite');
+    tail.append(busy);
+    return;
+  }
+  if (state.cursor === null) {
+    if (state.rows.length) {
+      tail.append(el('div', 'tail', 'That is the end of the list — '
+        + fmt(state.rows.length) + ' of ' + fmt(state.matched) + ' matching roles loaded.'));
+    }
+    return;
+  }
+  const button = el('button', 'more');
+  const remaining = Math.max(0, state.matched - state.rows.length);
+  button.innerHTML = 'Load the next <b>'
+    + fmt(Math.min(state.source.pageSize, remaining)) + '</b> — '
+    + fmt(remaining) + ' of ' + fmt(state.matched) + ' still to come';
+  button.addEventListener('click', () => loadMore());
+  tail.append(button);
+  observeTail(button);
+}
+
+/* Infinite scroll *on top of* the button, never instead of it: the button is the
+   keyboard and screen-reader path, and it keeps working when IntersectionObserver
+   is missing. Loading on approach is what keeps 880 rows responsive — the DOM only
+   ever holds what has been scrolled to. */
+let tailObserver = null;
+function observeTail(node){
+  if (typeof IntersectionObserver !== 'function') return;
+  if (tailObserver) tailObserver.disconnect();
+  tailObserver = new IntersectionObserver(entries => {
+    if (entries.some(entry => entry.isIntersecting) && !state.loading
+        && state.cursor !== null) {
+      loadMore();
+    }
+  }, { rootMargin: '400px' });
+  tailObserver.observe(node);
+}
+
+/* ===========================================================================
+   Provenance banner
+   =========================================================================== */
+
+/** Which data you are looking at, how old it is, and why — on every load.
+
+    Not a nicety. There are two sources with the same layout, one of them minutes old
+    and one of them as old as the last build, and a page that shows the second while
+    implying the first is simply lying about its numbers. So the banner names the
+    source, dates it, and on the fallback says what went wrong in words. */
+function renderBanner(){
+  const host = document.getElementById('source-banner');
+  clear(host);
+  const box = el('div', 'src');
+  box.dataset.kind = state.source.kind;
+  box.setAttribute('role', 'status');
+  box.append(el('span', 'src-tag',
+    state.source.kind === 'api' ? 'Live' : 'Snapshot'));
+  const text = el('div');
+  if (state.source.kind === 'api') {
+    text.innerHTML = 'Read live from the '
+      + (state.source.public ? 'public read API' : 'worklist API')
+      + ', just now. The corpus behind it was screened <b>'
+      + esc(absDate(state.source.generatedAt)) + '</b> ('
+      + esc(ageLabel(state.source.generatedAt)) + ')'
+      + (state.source.public
+        ? ' — the route is read-only, and it publishes no description text.'
+        : '.');
+  } else {
+    text.innerHTML = '<b>Not live: you are reading the snapshot this page was built '
+      + 'with on ' + esc(absDate(BOOT.builtAt)) + '</b> ('
+      + esc(ageLabel(BOOT.builtAt)) + '), holding ' + fmt(SNAP.itemCount) + ' of '
+      + fmt(SNAP.eligibleTotal) + ' eligible roles plus ' + fmt(SNAP.internshipCount)
+      + ' internships, from a pipeline run on ' + esc(absDate(SNAP.generatedAt)) + '. '
+      + esc(reasonText(state.source.reason))
+      + ' Counts and postings are as of that run, not of right now.';
+  }
+  box.append(text);
+  host.append(box);
+}
+
+/* ===========================================================================
+   "Why things were dropped"
+   =========================================================================== */
+
+let evidenceBuilt = false;
+
+async function renderEvidence(){
+  if (evidenceBuilt) return;
+  evidenceBuilt = true;
+  const view = document.getElementById('view-evidence');
+  clear(view);
+  view.append(el('h1', null, 'Why things were dropped'));
+  const lede = el('p', 'lede');
+  lede.innerHTML = 'Every exclusion below quotes the text that caused it, so you can check '
+    + 'the filter instead of trusting it. If a quote looks wrong, the filter is wrong — '
+    + 'flag it.';
+  view.append(lede);
+
+  let data;
+  try {
+    data = await state.source.excluded();
+  } catch (err) {
+    view.append(el('div', 'err', 'The exclusion ledger could not be loaded: ' + err.message));
+    evidenceBuilt = false;   // let a later visit retry
+    return;
+  }
+  view.append(funnelBlock(data));
+  const gates = data.groups.slice().sort((a, b) => b.count - a.count);
+  gates.forEach(group => view.append(gateBlock(group)));
+}
+
+function funnelBlock(data){
+  const box = el('div', 'funnel');
+  const funnel = data.funnel;
+  const nums = el('div', 'fnum');
+  [[fmt(funnel.screened), 'roles screened'],
+   [fmt(funnel.excluded), 'not applicable to you'],
+   [fmt(funnel.kept), 'left for you'],
+   [fmt(funnel.needsLevelCheck), 'of those, level unverified']].forEach(([n, label]) => {
+    const cell = el('div');
+    cell.append(el('b', null, n));
+    cell.append(el('span', null, label));
+    nums.append(cell);
+  });
+  box.append(nums);
+
+  if (data.gateCountsOvercount) {
+    const caveat = el('div', 'caveat');
+    caveat.innerHTML = '<b>The gate counts below add up to ' + fmt(data.gateCountTotal)
+      + ', which is more than the ' + fmt(data.excludedTotal)
+      + ' roles actually removed.</b> That is expected, not an error: a role routinely '
+      + 'fails several gates at once — senior <em>and</em> clearance-only <em>and</em> '
+      + 'citizenship-restricted. So these are ' + fmt(data.groups.length)
+      + ' overlapping counts, not a subtraction chain.';
+    box.append(caveat);
+  }
+  return box;
+}
+
+function gateBlock(group){
+  const gate = el('div', 'gate');
+  gate.dataset.open = '0';
+  const bodyId = nextId('gate');
+  const head = el('button', 'gate-h');
+  head.setAttribute('aria-expanded', 'false');
+  head.setAttribute('aria-controls', bodyId);
+  head.append(el('span', 'caret', '▶'));
+  head.append(el('span', 'gate-name', GATE_LABEL[group.gate] || group.gate));
+  head.append(el('span', 'gate-n', fmt(group.count) + ' roles'));
+
+  const body = el('div', 'gate-body');
+  body.id = bodyId;
+
+  if (EVIDENCE_KIND[group.gate]) {
+    const note = el('div', 'noquote');
+    note.innerHTML = EVIDENCE_KIND[group.gate];
+    body.append(note);
+  }
+  if (group.gate === 'internship_not_full_time') {
+    // The one gate whose rows are not simply gone: 48 of them are on the worklist page
+    // under their own heading. Said here because this is where a reader counting 318
+    // dropped postings would otherwise conclude they all vanished.
+    const seeAlso = el('div', 'note');
+    seeAlso.textContent = internshipReconciliation(
+      state.source.internshipTotal, group.count).trim()
+      || 'Software internships that pass every other gate are listed on the worklist.';
+    body.append(seeAlso);
+  }
+
+  group.items.forEach(row => body.append(exclusionRow(row, group.gate)));
+  body.append(gateTail(group, body));
+
+  head.addEventListener('click', () => {
+    const open = gate.dataset.open === '1';
+    gate.dataset.open = open ? '0' : '1';
+    head.setAttribute('aria-expanded', String(!open));
+  });
+  gate.append(head, body);
+  return gate;
+}
+
+function exclusionRow(row, gate){
+  const wrap = el('div');
+  wrap.append(el('div', 'ex-title', row.title));
+  const meta = [row.company, row.location || null, row.ats].filter(Boolean).join('  ·  ');
+  wrap.append(el('div', 'ex-co', meta));
+
+  const evidence = row.quote || row.reason;
+  if (evidence) {
+    // A quoted policy sentence gets the quote treatment; a title, an ATS enum value or
+    // a board name does not, because styling it as a quotation would dress a rule up as
+    // the employer's own words.
+    wrap.append(el('div', NON_POLICY_GATES.has(gate) ? 'noquote' : 'quote', evidence));
+    if (gate === 'wrong_seniority_band') {
+      wrap.append(el('div', 'note', row.levelSource === 'years'
+        ? 'read as ' + row.level + ' from a years-of-experience line in the description'
+        : 'read as ' + row.level + ' from a marker in the title'));
+    }
+  } else {
+    wrap.append(el('div', 'noquote',
+      'No evidence was recorded for this row, which is itself a defect worth flagging.'));
+  }
+
+  const flag = el('button', 'flag', 'Flag as a misfire');
+  flag.setAttribute('aria-pressed', 'false');
+  flag.addEventListener('click', () => {
+    const on = flag.getAttribute('aria-pressed') === 'true';
+    flag.setAttribute('aria-pressed', String(!on));
+    flag.textContent = on ? 'Flag as a misfire' : 'Flagged — will review';
+  });
+  wrap.append(flag);
+  return wrap;
+}
+
+/** Per-gate paging. The snapshot cannot page, and says so rather than looking
+    like it ran out of rows at exactly 25. */
+function gateTail(group, body){
+  const tail = el('div');
+  const shown = group.items.length;
+  if (!group.page.hasMore) {
+    if (shown < group.count) {
+      tail.append(el('div', 'tail', 'Showing ' + fmt(shown) + ' of ' + fmt(group.count) + '.'));
+    }
+    return tail;
+  }
+  if (state.source.kind !== 'api') {
+    tail.append(el('div', 'tail', 'This snapshot holds the first ' + fmt(shown) + ' of '
+      + fmt(group.count) + ' rows for this gate. The live API pages the rest.'));
+    return tail;
+  }
+  let cursor = group.page.nextCursor;
+  let loaded = shown;
+  const button = el('button', 'more');
+  const label = () => { button.innerHTML = 'Load 25 more — showing <b>' + fmt(loaded)
+    + '</b> of ' + fmt(group.count); };
+  label();
+  button.addEventListener('click', async () => {
+    button.disabled = true;
+    try {
+      const next = await state.source.excludedPage(group.gate, cursor);
+      next.items.forEach(row => body.insertBefore(exclusionRow(row, group.gate), tail));
+      loaded += next.items.length;
+      cursor = next.page.nextCursor;
+      if (cursor === null) { button.remove(); return; }
+      label();
+      button.disabled = false;
+    } catch (err) {
+      button.disabled = false;
+      tail.append(el('div', 'err', 'Could not load more: ' + err.message));
+    }
+  });
+  tail.append(button);
+  return tail;
+}
+
+/* ===========================================================================
+   Routing + boot
+   =========================================================================== */
+
+function show(which){
+  // The nav is live before ``pickSource`` resolves — a click in that window has no
+  // source to read from, so it is ignored rather than throwing.
+  if (!state.source) return;
+  const today = which === 'today';
+  document.getElementById('view-today').hidden = !today;
+  document.getElementById('view-evidence').hidden = today;
+  document.getElementById('nav-today').setAttribute('aria-current', today ? 'page' : 'false');
+  document.getElementById('nav-evidence').setAttribute('aria-current', today ? 'false' : 'page');
+  if (!today) renderEvidence();
+  window.scrollTo(0, 0);
+}
+document.getElementById('nav-today').addEventListener('click', () => show('today'));
+document.getElementById('nav-evidence').addEventListener('click', () => show('evidence'));
+
+pickSource().then(source => {
+  state.source = source;
+  renderBanner();
+  renderToday();
+}).catch(err => {
+  // ``pickSource`` cannot reject — it degrades to the snapshot — so anything landing
+  // here is a fault in this file, and a blank page would hide it.
+  document.getElementById('view-today').append(
+    el('div', 'err', 'The page failed to start: ' + (err && err.message ? err.message : err)));
+});
+</script>
+</body>
+</html>

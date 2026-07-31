@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 
+from copilot.domain.demo_boards import is_demo_tenant
 from copilot.domain.eligibility import Eligibility, Sponsorship, screen_eligibility
 from copilot.domain.posting import Posting
 from copilot.domain.seniority import JUNIOR_BANDS, Level, LevelVerdict, decide_level
@@ -58,6 +59,33 @@ _NOT_SWE_TITLE = re.compile(
 )
 
 
+# An internship is not a junior role, it is a different product: it cannot support
+# the work authorisation this search exists to obtain. Left ungated, 50 of them
+# survived, and 5 of those ranked *exact match* — crowding the one list whose whole
+# job is to be short and correct.
+#
+# Every token here is `\b`-anchored, and that is not decoration. Unanchored `intern`
+# matches "Internal Tools Engineer", "Internationalization Engineer" and "Internals
+# Engineer" — three real title shapes in this corpus. This is the same missing
+# word-boundary bug that made `itar` match "sanitary" (2,476 false exclusions) and
+# `rust` match "robust"; it has now cost us three times, so the boundaries here are
+# asserted by name in the test suite rather than trusted.
+_INTERNSHIP_TITLE = re.compile(
+    r"""\b(
+        intern | interns | internship | internships
+      | co-?ops? | placement\s+student | industrial\s+placement
+      | apprentice(?:ship)? | working\s+student | werkstudent
+      | summer\s+analyst | new\s+grad\s+intern
+    )\b""",
+    re.I | re.X,
+)
+
+#: ATS ``employment_type`` values that mean "internship". Free text across five
+#: boards, so matched case-insensitively on the substring after stripping — the
+#: corpus really contains ``Intern``, ``Internship``, ``Temporary FT`` and
+#: ``Permanent contract & B2B`` in the same field.
+_INTERNSHIP_TYPES = frozenset({"intern", "internship", "co-op", "coop", "apprenticeship"})
+
 #: Sorts undated postings last without dropping them.
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -66,6 +94,8 @@ class Exclusion(StrEnum):
     """Why a posting was removed. Ordered by the gate that caught it."""
 
     NOT_SWE = "not_a_software_role"
+    DEMO_BOARD = "ats_vendor_demo_board"
+    INTERNSHIP = "internship_not_full_time"
     LEVEL = "wrong_seniority_band"
     CLEARANCE = "security_clearance_required"
     CITIZENSHIP = "citizenship_or_itar_restricted"
@@ -95,17 +125,27 @@ class ScreenDecision:
         matching evidence rather than whichever reason happened to come first.
         """
         quoted = dict(self.eligibility.evidence)
-        if exclusion is Exclusion.NOT_SWE:
-            return f"not a software engineering role: {self.posting.title!r}"
-        if exclusion is Exclusion.LEVEL:
-            return f"seniority band is {self.level.value}, not entry-level"
-        if exclusion is Exclusion.CLEARANCE:
-            return f"clearance required — {quoted.get('clearance', '')!r}"
-        if exclusion is Exclusion.CITIZENSHIP:
-            return f"citizenship/ITAR — {quoted.get('citizenship', '')!r}"
-        if exclusion is Exclusion.NO_SPONSORSHIP:
-            return f"will not sponsor — {quoted.get('no_sponsorship', '')!r}"
-        return exclusion.value
+        reasons: dict[Exclusion, str] = {
+            Exclusion.NOT_SWE: f"not a software engineering role: {self.posting.title!r}",
+            Exclusion.DEMO_BOARD: (
+                f"{self.posting.company!r} is an ATS vendor demo board, not an employer"
+            ),
+            Exclusion.INTERNSHIP: self._internship_reason(),
+            Exclusion.LEVEL: f"seniority band is {self.level.value}, not entry-level",
+            Exclusion.CLEARANCE: f"clearance required — {quoted.get('clearance', '')!r}",
+            Exclusion.CITIZENSHIP: f"citizenship/ITAR — {quoted.get('citizenship', '')!r}",
+            Exclusion.NO_SPONSORSHIP: (
+                f"will not sponsor — {quoted.get('no_sponsorship', '')!r}"
+            ),
+        }
+        return reasons.get(exclusion, exclusion.value)
+
+    def _internship_reason(self) -> str:
+        """Quote whichever signal fired, since the title and the type disagree often."""
+        hit = _INTERNSHIP_TITLE.search(self.posting.title)
+        if hit:
+            return f"internship, not full-time — {hit.group(0)!r} in the title"
+        return f"internship, not full-time — employment type {self.posting.employment_type!r}"
 
     @property
     def reasons(self) -> tuple[str, ...]:
@@ -127,12 +167,56 @@ def is_software_role(title: str) -> bool:
     return bool(_SWE_TITLE.search(title))
 
 
-def screen(posting: Posting, *, wanted: frozenset[Level] = JUNIOR_BANDS) -> ScreenDecision:
-    """Run the funnel over one posting. Gates are cheapest-first."""
+def is_internship(title: str, employment_type: str = "") -> bool:
+    """Whether a posting is an internship, co-op or apprenticeship.
+
+    Reads the title *and* the ATS ``employment_type``, because neither alone is
+    enough: 22 postings in this corpus declare type ``Intern``/``Internship`` with a
+    clean title like "Software Engineer, Product", and 27 carry it only in the title
+    while leaving the type field empty. 382 of 880 postings have no type at all, so
+    a type-only gate would miss nearly half the corpus by construction.
+    """
+    if title and _INTERNSHIP_TITLE.search(title):
+        return True
+    kind = employment_type.strip().lower().replace(" ", "")
+    return any(kind == t.replace("-", "").replace(" ", "") for t in _INTERNSHIP_TYPES)
+
+
+def screen(
+    posting: Posting,
+    *,
+    wanted: frozenset[Level] = JUNIOR_BANDS,
+    include_internships: bool = False,
+) -> ScreenDecision:
+    """Run the funnel over one posting. Gates are cheapest-first.
+
+    ``include_internships`` defaults to False because this search exists to obtain
+    full-time work authorisation, which an internship cannot support. It is a flag
+    rather than a hardcoded rule because it is a *product* decision, not a
+    correctness one, and because "Fall 2026" internships at large employers are a
+    real entry path for some people — flipping it back should cost one argument.
+
+    Note that ``Level.INTERN`` deliberately stays in :data:`JUNIOR_BANDS`. Level
+    classification answers "what band is this posting", which is a fact about the
+    posting; whether internships are wanted is a fact about the searcher. Collapsing
+    the two would mean a candidate who *does* want internships could not express it
+    without editing the seniority model.
+    """
     exclusions: list[Exclusion] = []
 
     if not is_software_role(posting.title):
         exclusions.append(Exclusion.NOT_SWE)
+
+    # Gated here as well as in the watchlist parser, and the redundancy is the point:
+    # the parser stops the *next* fetch, but 317 demo postings are already stored and
+    # no store exposes a delete. A read-time gate is the only one that is portable
+    # across SQLite and DynamoDB without inventing a purge port, and it means a demo
+    # board that slips past discovery can never reach the page.
+    if is_demo_tenant(posting.company):
+        exclusions.append(Exclusion.DEMO_BOARD)
+
+    if not include_internships and is_internship(posting.title, posting.employment_type):
+        exclusions.append(Exclusion.INTERNSHIP)
 
     verdict = decide_level(
         posting.title, posting.description, desc_available=posting.desc_available
@@ -200,7 +284,10 @@ class ScreenReport:
 
 
 def screen_all(
-    postings: Sequence[Posting], *, wanted: frozenset[Level] = JUNIOR_BANDS
+    postings: Sequence[Posting],
+    *,
+    wanted: frozenset[Level] = JUNIOR_BANDS,
+    include_internships: bool = False,
 ) -> tuple[list[ScreenDecision], list[ScreenDecision], ScreenReport]:
     """Screen a batch. Returns ``(kept, excluded, report)``.
 
@@ -212,7 +299,7 @@ def screen_all(
     kept: list[ScreenDecision] = []
     excluded: list[ScreenDecision] = []
     for posting in postings:
-        decision = screen(posting, wanted=wanted)
+        decision = screen(posting, wanted=wanted, include_internships=include_internships)
         report.note(decision)
         (kept if decision.kept else excluded).append(decision)
     kept.sort(key=lambda d: d.posting.posted_at or _EPOCH, reverse=True)

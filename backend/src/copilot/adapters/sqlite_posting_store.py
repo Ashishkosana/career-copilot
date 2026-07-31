@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS postings (
     posted_at       TEXT,
     remote          INTEGER,
     employment_type TEXT NOT NULL DEFAULT '',
+    experience_level TEXT NOT NULL DEFAULT '',
     first_seen      TEXT NOT NULL,
     last_seen       TEXT NOT NULL,
     closed_at       TEXT,
@@ -59,7 +60,15 @@ CREATE INDEX IF NOT EXISTS idx_postings_company ON postings(company);
 
 _COLUMNS = (
     "id, url, title, company, ats, tenant, location, description, desc_available, "
-    "req_id, posted_at, remote, employment_type"
+    "req_id, posted_at, remote, employment_type, experience_level"
+)
+
+#: Columns added after the first release. ``CREATE TABLE IF NOT EXISTS`` is a no-op
+#: on an existing file, so a new column in :data:`_SCHEMA` alone would leave every
+#: already-populated database (the developer's ~25k-row ``data/postings.db``) one
+#: column short and every read raising ``KeyError``. Applied idempotently at open.
+_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("experience_level", "TEXT NOT NULL DEFAULT ''"),
 )
 
 
@@ -80,7 +89,22 @@ class SqlitePostingStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add any column this code needs that an older file does not have.
+
+        Deliberately additive-only and idempotent — no version table, no
+        down-migration. The corpus is *derived* data: it re-fetches from public
+        boards in under a minute, so the cost of a wrong migration is far higher
+        than the cost of rebuilding, and the only thing worth preserving across a
+        schema change is ``first_seen`` and the LLM cache.
+        """
+        have = {str(row["name"]) for row in self._conn.execute("PRAGMA table_info(postings)")}
+        for name, ddl in _ADDED_COLUMNS:
+            if name not in have:
+                self._conn.execute(f"ALTER TABLE postings ADD COLUMN {name} {ddl}")
 
     def close(self) -> None:
         self._conn.close()
@@ -109,7 +133,7 @@ class SqlitePostingStore:
                 p.description, int(p.desc_available), p.req_id,
                 _iso(p.posted_at) if p.posted_at else None,
                 None if p.remote is None else int(p.remote),
-                p.employment_type, stamp, stamp,
+                p.employment_type, p.experience_level, stamp, stamp,
             )
             for p in postings
         ]
@@ -117,7 +141,7 @@ class SqlitePostingStore:
             conn.executemany(
                 f"""
                 INSERT INTO postings ({_COLUMNS}, first_seen, last_seen)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET
                     last_seen = excluded.last_seen,
                     closed_at = NULL,
@@ -195,6 +219,12 @@ class SqlitePostingStore:
             posted_at=datetime.fromisoformat(row["posted_at"]) if row["posted_at"] else None,
             remote=None if row["remote"] is None else bool(row["remote"]),
             employment_type=row["employment_type"],
+            # Read here as well as written because the DynamoDB adapter round-trips
+            # it, and a field one implementation of a port keeps while the other
+            # silently drops is the exact class of divergence the port exists to
+            # rule out — it would surface as the same posting gating differently
+            # on the laptop and in Lambda.
+            experience_level=row["experience_level"],
         )
 
     def new_since(self, since: datetime) -> list[Posting]:

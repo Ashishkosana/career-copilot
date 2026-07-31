@@ -441,3 +441,89 @@ class TestFunnelArithmetic:
         assert report.kept == 1
         assert report.excluded == 1
         assert report.gate_count_total > report.excluded
+
+
+class TestCitizenshipRecallGap:
+    """Phrasings the citizenship gate used to miss, and the ones it must never take.
+
+    Found by probing the gate with real JD wording rather than by reading it: three
+    common constructions slipped through. Measured on the 25,294-posting corpus the
+    gap was **2 of 813 kept roles** — small today, but both were listed under
+    "Eligibility", and "US citizen or permanent resident" is the standard phrasing in
+    government-adjacent postings, so it grows with the watchlist.
+
+    The second class matters more than the first. "Open to US citizens, permanent
+    residents, and candidates requiring visa sponsorship" contains the exclusionary
+    phrase *verbatim* while meaning the opposite. Excluding it would repeat the
+    ``itar`` failure — that unanchored pattern matched inside "military" and
+    "sanitary" and threw away 2,476 roles — and a false exclusion is invisible in a
+    way a false inclusion is not.
+    """
+
+    @pytest.mark.parametrize(
+        "description",
+        [
+            "This position requires US citizenship due to federal contract requirements.",
+            "Requires United States citizenship.",
+            "Candidates must hold US citizenship.",
+            "You must possess U.S. citizenship for this role.",
+            "Applicants must be US Citizens or Permanent Residents.",
+            "- Eligibility\n- US citizen or permanent resident, and based in the US",
+            "US citizen or lawful permanent resident required.",
+            "Citizenship is a requirement for this position.",
+            "Citizenship is a prerequisite.",
+            # the originals, which must keep working
+            "Must be a US citizen.",
+            "U.S. citizenship is required.",
+            "US citizens only.",
+            "Subject to ITAR.",
+        ],
+    )
+    def test_a_real_citizenship_requirement_is_caught(self, description: str) -> None:
+        assert screen_eligibility(description, desc_available=True).citizenship_required
+
+    @pytest.mark.parametrize(
+        "description",
+        [
+            "Open to US citizens, permanent residents, and candidates requiring visa sponsorship.",
+            "US citizens, permanent residents, and visa holders are all welcome to apply.",
+            "We accept OPT and CPT candidates as well as US citizens or permanent residents.",
+            "Any work authorization accepted, including US citizens or permanent residents.",
+            "We hire regardless of citizenship status.",
+            "We sponsor visas; US citizens or permanent residents also encouraged.",
+            # the historical over-match: none of these are about citizenship at all
+            "Benefits include military leave.",
+            "We value a sanitary workplace.",
+            "Solitary work is not required.",
+            "Great benefits and a robust culture.",
+        ],
+    )
+    def test_inclusive_phrasing_is_never_excluded(self, description: str) -> None:
+        assert not screen_eligibility(description, desc_available=True).citizenship_required
+
+    def test_a_friendly_intro_cannot_launder_a_restrictive_requirement(self) -> None:
+        """The veto discards one hit and keeps looking; it does not give up.
+
+        A posting that welcomes every work authorisation in its intro and then says
+        "US citizens only" under requirements is closed. Returning on the first veto
+        would let the marketing sentence override the binding one.
+        """
+        description = (
+            "We welcome applicants of any work authorization and love our team. "
+            + "Filler about culture. " * 20
+            + "Requirements: US citizens only."
+        )
+        assert screen_eligibility(description, desc_available=True).citizenship_required
+
+    def test_the_veto_window_does_not_reach_across_the_whole_document(self) -> None:
+        """A sponsorship blurb far from the requirement must not cancel it."""
+        description = (
+            "Must be a US citizen." + " Unrelated paragraph. " * 60 + "We sponsor visas."
+        )
+        assert screen_eligibility(description, desc_available=True).citizenship_required
+
+    def test_still_not_checked_without_a_description(self) -> None:
+        """The Workday failure mode: empty text matches nothing, so it must not pass."""
+        result = screen_eligibility("", desc_available=False)
+        assert result.checked is False
+        assert result.citizenship_required is False
