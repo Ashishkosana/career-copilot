@@ -3,7 +3,7 @@ from copilot.domain import scoring
 from copilot.domain.scoring import SWE_PROFILE
 
 
-def test_score_rewards_profile_keywords_and_caps():
+def test_score_rewards_profile_keywords_and_caps() -> None:
     strong = scoring.score("Software Engineer, Full Stack",
                            "Flutter mobile app on AWS Lambda + DynamoDB, Python backend")
     weak = scoring.score("Barista", "make coffee and greet customers")
@@ -11,20 +11,20 @@ def test_score_rewards_profile_keywords_and_caps():
     assert scoring.score(" ".join(SWE_PROFILE.keywords), " ".join(SWE_PROFILE.keywords)) == 100
 
 
-def test_title_gating():
+def test_title_gating() -> None:
     assert SWE_PROFILE.matches_title("Full Stack Engineer")
     assert not SWE_PROFILE.matches_title("Senior Software Engineer")  # blocklist
     assert not SWE_PROFILE.matches_title("Marketing Manager")         # must-include fails
 
 
-def test_job_id_stable_and_short():
+def test_job_id_stable_and_short() -> None:
     a = scoring.job_id("https://x.com/1")
     assert a == scoring.job_id("https://x.com/1")
     assert a != scoring.job_id("https://x.com/2")
     assert len(a) == 16
 
 
-def test_rank_filters_scores_dedups_and_orders():
+def test_rank_filters_scores_dedups_and_orders() -> None:
     postings = [
         {"title": "Full Stack Engineer", "company": "Acme", "url": "https://j/1",
          "description": "Flutter, AWS Lambda, DynamoDB, Python, full stack"},
@@ -43,7 +43,7 @@ def test_rank_filters_scores_dedups_and_orders():
     assert ranked[0].score >= ranked[1].score  # ordered desc
 
 
-def test_rank_respects_seen_and_limit():
+def test_rank_respects_seen_and_limit() -> None:
     postings = [
         {"title": "Software Engineer", "company": "A", "url": "https://j/1"},
         {"title": "Software Engineer", "company": "B", "url": "https://j/2"},
@@ -54,7 +54,7 @@ def test_rank_respects_seen_and_limit():
     assert len(scoring.rank(postings, min_score=10, limit=1)) == 1
 
 
-def test_rank_skips_incomplete_postings():
+def test_rank_skips_incomplete_postings() -> None:
     postings = [
         {"title": "", "url": "https://j/1", "description": "engineer"},
         {"title": "Engineer", "url": "", "description": "engineer"},

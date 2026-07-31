@@ -5,13 +5,13 @@ from pydantic import ValidationError
 from copilot.domain.models import ApplicationStatus, Email, Job, TriagedEmail
 
 
-def test_email_is_frozen():
+def test_email_is_frozen() -> None:
     e = Email(sender="a@b.com", subject="hi")
     with pytest.raises(ValidationError):
         e.subject = "changed"  # type: ignore[misc]
 
 
-def test_job_score_bounds():
+def test_job_score_bounds() -> None:
     Job(id="1", title="t", company="c", url="u", score=0)
     Job(id="1", title="t", company="c", url="u", score=100)
     with pytest.raises(ValidationError):
@@ -20,7 +20,7 @@ def test_job_score_bounds():
         Job(id="1", title="t", company="c", url="u", score=-1)
 
 
-def test_needs_action_derived_from_status():
+def test_needs_action_derived_from_status() -> None:
     def te(status: ApplicationStatus, *, job: bool = True) -> TriagedEmail:
         return TriagedEmail(email=Email(sender="a", subject="b"), is_job_related=job, status=status)
 
