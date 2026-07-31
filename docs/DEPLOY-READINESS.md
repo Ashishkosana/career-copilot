@@ -1,12 +1,29 @@
 # Deploy readiness
 
-An independent verification of the public read route, the internships collection, the
-credential tiers and the CDK cutover. Every number below was produced by running the
-thing, on this machine, against the real corpus — not read out of a report.
+An independent, adversarial verification of the materialised screening view and the read
+API built on it. Every number below was produced by running the thing on this machine
+against the real 25,294-posting corpus. Nothing here was copied out of a report.
 
-**Verdict: ship it, after the four steps in the last section.** Two real defects were
-found and fixed; one of them meant an entire feature was dead code in production. No
-deploy, no AWS mutation and no secret value was read in producing this document.
+This document exists because the previous run reported itself green and shipped a read
+API that returns 504 on **every single request**, which it still does right now:
+
+```
+$ curl -s -o /dev/null -w "HTTP %{http_code}  %{time_total}s\n" --max-time 40 \
+    "https://<api>/prod/public/worklist?limit=1"
+HTTP 504  29.379660s
+$ curl … "…/public/worklist?limit=25"
+HTTP 504  29.359284s
+$ curl … "…/public/worklist"
+HTTP 504  29.226023s
+```
+
+**Verdict: the fix in the working tree is real and it works. It is not deployed.** The
+timing claims reproduce, the two stores are behaviourally identical on the new methods,
+no Scan was introduced, the public projection holds under attack, and the not-ready
+states answer in microseconds. Seven further defects were found and fixed here — one of
+which was that the page generator could not build the site at all.
+
+No AWS mutation, no deploy, no secret value read, no commit.
 
 ---
 
@@ -16,7 +33,7 @@ deploy, no AWS mutation and no secret value was read in producing this document.
 
 ```
 $ cd backend && .venv/bin/python -m pytest
-684 passed in 1.07s
+856 passed in 1.09s
 
 $ .venv/bin/python -m ruff check src tests scripts ../tools
 All checks passed!
@@ -25,513 +42,702 @@ $ .venv/bin/python -m mypy
 Success: no issues found in 77 source files
 
 $ cd infra && npx tsc --noEmit
-(clean)
+tsc: clean
 
 $ npx cdk synth -c myEmail=… -c ownerUserId=… -c alarmEmail=…
-exit=0
+Successfully synthesized to infra/cdk.out
 
 $ backend/.venv/bin/python tools/ui/build_ui.py --check-js
+screening view: reusing generation 20260731T093136.748618Z (25294 screened, 811 eligible, 0.2 h old)
 public read API contract: 4 routes OK under /public
-snapshot holds 813 of 813 eligible roles
+snapshot holds 811 of 811 eligible roles
 internships: 48 software internships, from 318 postings the internship gate removed
-UI_EXIT=0
+wrote build/ui.html  (1910 KiB)
+wrote docs/index.html  (1180 KiB)
+EXIT=0
 ```
 
-684 tests, up from the 669 that were there when this review started: 15 added here.
+Baseline was 710. **856 now**, +146. Nothing was deleted to get there: 141 cases in
+`test_dynamodb_posting_store.py` alone, of which 49 run twice — once per store — from one
+parametrised fixture.
 
-### The keyless product works, with no credentials of any kind
-
-Run with `AWS_CONFIG_FILE=/dev/null`, `AWS_SHARED_CREDENTIALS_FILE=/dev/null`, EC2
-metadata disabled and every `AWS_*` / `*_API_KEY` variable stripped from the
-environment. Every credential lookup returns "no result" and none raises:
+### The screen, on the real corpus
 
 ```
-remaining AWS/key vars: ['AWS_CONFIG_FILE', 'AWS_DEFAULT_REGION',
-                         'AWS_EC2_METADATA_DISABLED', 'AWS_SHARED_CREDENTIALS_FILE']
-api_key(llm path):    -> ''    (no raise)
-api_key(env miss):    -> ''    (no raise)
-api_key(no name):     -> ''    (no raise)
-secret_json(gmail):   -> None  (no raise)
-secret_json(missing): -> None  (no raise)
-llm_reply    -> ''
-interpreter  -> None
+open_postings():        25294 rows in 2.02s
+build_screening_view:   39.00s  (1.542 ms/posting)  rows=45158
+  extrapolated to 47,538: 73.3s
+save_screening:         45158 rows in 0.40s
+screening_summary():    0.173 ms
+FUNNEL screened=25294 kept=811 excluded=24483 eligible=811 internships=48
+       needsLevelCheck=631 gateCountTotal=44299
+  internship gate fires=318   collection=48
+  rows/posting = 1.79
 ```
 
-Each failure logs a name and a code, never a value:
+Every figure the materialisation agent reported reproduces: 1.79 rows per posting, 811
+kept, 48 internships against 318 internship-gate fires, 44,299 gate fires over 24,483
+excluded postings.
+
+### Peak memory of the screen — nobody had measured this
+
+The cron has **2048 MB**, less than the read Lambdas' 3008, and the screen is the biggest
+thing it does.
 
 ```
-{"level":"WARNING","logger":"copilot.adapters.ssm_secrets","message":"secret_unavailable",
- "store":"parameter","name":"/career-copilot/llm-api-key","code":"NoCredentialsError"}
+baseline RSS               32.7 MB
+after open_postings       361.5 MB   (25294 postings)
+after build view          362.2 MB   (45158 rows)
+extrapolated to 47,538    680.7 MB  vs cron memory 2048 MB
 ```
 
-And with no credentials the whole pipeline still runs on the real
-`data/postings.db`:
+Fits with 3× headroom. On DynamoDB add the intermediate list of deserialised items that
+`open_postings` holds while it maps them (description strings are shared by reference, so
+this is dict overhead, not another 268 MB) — budget ~1 GB of 2048.
+
+### Read timings — real corpus, 25,294 postings / 45,158 view rows, best of 5
+
+Driven through synthetic API Gateway events, through `route()`, with a real
+5,167-character résumé loaded. The ceiling is the API Gateway REST integration limit, 29 s.
+
+| read | status | ms | vs 29 s |
+|---|---|---|---|
+| `GET /excluded` (all 7 gates) | 200 | **1.57** | 18,487× under |
+| `GET /excluded?gate=not_a_software_role&limit=100` (22,074-row view) | 200 | **1.90** | 15,293× under |
+| `GET /public/excluded` | 200 | **2.88** | 10,078× under |
+| `GET /worklist/{id}` | 200 | **8.18** | 3,544× under |
+| `GET /public/worklist/{id}` | 200 | **9.48** | 3,059× under |
+| `GET /internships?limit=25` | 200 | **129.07** | 225× under |
+| `GET /worklist?limit=25` | 200 | **131.98** | 220× under |
+| `GET /public/worklist?limit=25` | 200 | **132.82** | 218× under |
+| `GET /worklist?limit=25&cursor=…` (page 2) | 200 | **128.41** | 226× under |
+| `GET /worklist?postedAfter=…` (row-only filter) | 200 | 135.71 | 214× under |
+| `GET /worklist?level=entry` (row-only filter) | 200 | 136.33 | 213× under |
+| `GET /worklist?ats=greenhouse` (hydrates the view) | 200 | 145.75 | 199× under |
+| `GET /internships?tier=strong` (hydrates + scores 48) | 200 | 242.82 | 119× under |
+| `GET /worklist?limit=100` (MAX_LIMIT) | 200 | **509.11** | 57× under |
+| `GET /worklist?tier=strong` (hydrates + scores 811) | 200 | **4135.74** | **7× under** |
+| not screened yet (auth / public) | 503 | **0.010 / 0.013** | ~2,000,000× |
+| view 72 h stale (auth / public) | 503 | **0.026 / 0.029** | ~1,000,000× |
+
+Full walks, the way `build_ui.py` does them: `/worklist` 9 pages / 811 items / 4.19 s,
+`/internships` 1 page / 48 items / 0.25 s. Both reconcile — `len(items) == matched` and
+`matched == eligibleTotal`.
+
+The two numbers to read together are **1.90 ms and 131.98 ms**. The 1.90 ms is a page of
+100 out of the *largest* view (22,074 rows) and it is the same as a page out of a 48-row
+view: the store cost does not move with the corpus, which is the whole property. The
+131.98 ms is scoring, at ~5.1 ms per posting against the résumé, times the page size — so
+a read scales with `limit` and with nothing else. Before this change the *best* case was
+39 s, 1.4× **over** the ceiling.
+
+One read does not clear the brief's 5× bar and it is called out in full below: see
+**Broken → finding 1**.
+
+### No read path can reach a full-corpus screen
+
+Every call site accounted for:
 
 ```
-screened=25294  kept=813  excluded=24481
-scoring available (keyless) = True
-exact matches in worklist = 20
+$ grep -rn "open_postings" src/
+adapters/sqlite_posting_store.py:410      def open_postings           (definition)
+adapters/dynamodb_posting_store.py:964    def open_postings           (definition)
+ports/postingstore.py:380                 def open_postings           (port declaration)
+adapters/dynamodb_posting_store.py:33,51,55,163                       (docstrings)
+handlers/public_api.py:30                                             (docstring)
+handlers/worklist_api.py:23                                           (docstring)
+services/daily_briefing.py:569            corpus = self.posting_store.open_postings()
 ```
 
-One thing worth stating precisely, because a report claimed more than is true:
-`GmailMailbox.fetch_recent` **does** raise `RuntimeError` when no credential resolves.
-That is not a defect — `_resolve_credentials` degrades to `None`, and the raise happens
-one layer up in `_get_service`, where the service catches it and reports
-`inbox_ok: false` with the supply half of the run intact. The claim "nothing in the
-credential path raises" is true of the credential path and false of the mailbox
-surface; the containment is real either way and is what matters.
-
-### Internships are separated, not leaked — measured on the real corpus
+**One caller, in the cron.** Zero in `handlers/`.
 
 ```
-screened      25294
-kept (worklist)  813      exact matches in worklist         20
-internships       48      exact matches among internships    5
-worklist ∩ internships     = 0
-INTERN level in worklist   = 0
-demo boards in worklist    = 0
-demo boards in internships = 0
-worklist levels     {'unknown': 632, 'entry': 181}
-internship levels   {'intern': 45, 'unknown': 3}
+$ grep -rn "screen_all" src/
+domain/screening.py:286      def screen_all              (definition, no production caller)
+services/daily_briefing.py:287                           (docstring saying why it is not used)
+
+$ grep -rn "screen(" src/copilot/handlers/
+handlers/worklist_api.py:1448    decision = screen(posting)   ← one posting, in GET /worklist/{id}
 ```
 
-The 318 → 48 reconciliation holds, and every dropped posting is dropped by a gate that
-has nothing to do with being an internship:
+`build_index`, `WorklistIndex` and the handler-side `_internship_collection` are gone.
+Two assertions in the suites keep it that way: a call-log audit over all five routes in
+both suites, and an AST walk asserting the module does not *name* `open_postings`.
+
+### Both stores are behaviourally identical — checked independently, on real data
+
+The shared suite runs **49 cases against both implementations** (98 test IDs), covering
+every case the brief named plus the new methods:
 
 ```
-internship gate fired on 318 postings
-of the 270 dropped: not_a_software_role 265, citizenship_or_itar 20,
-                    employer_will_not_sponsor 17, wrong_seniority_band 4,
-                    security_clearance 3, ats_vendor_demo_board 12
+$ pytest tests/test_dynamodb_posting_store.py -o addopts= -v \
+    | grep -oE "\[(dynamodb|sqlite)\]" | sort | uniq -c
+  49 [dynamodb]
+  49 [sqlite]
 ```
 
-Both numbers ride in every response (`internshipTotal: 48`,
-`funnel.gates.internship_not_full_time: 318`) so the 270 difference reads as an
-explanation rather than a bug.
+Named cases, each present for both stores: `test_an_empty_fetch_does_not_mass_close`,
+`test_an_empty_description_never_overwrites_a_real_one`,
+`test_a_reappearing_posting_is_reopened`, `test_first_seen_is_never_overwritten`,
+`test_cache_survives_a_refetch`,
+`test_a_screen_that_dies_mid_write_leaves_the_previous_view_current`,
+`test_rows_under_an_unpublished_generation_are_unreachable`.
 
-### The public route survived an adversarial pass
-
-Every attack below was run in code against the real corpus and the real handler, not
-reasoned about. What actually happened:
-
-| Attack | Result |
-|---|---|
-| Return description prose | **No.** A marker sentence planted in a description appears in none of the four payloads. All 861 `description` values in the published page are `null`. |
-| Return an evidence quote over 180 chars | **No.** A 640-char title produced `reason` and `quote` both exactly 180 chars ending `…`. |
-| Return any string over the payload bound | **Was yes — fixed.** See "Broken", item 2. Now 0 strings over 400 chars across a 44-payload sweep. |
-| Return résumé text | **No.** The real 5,167-char résumé is loaded; none of its 34 prose lines appears anywhere. The score still publishes `Python` — a `gap.VOCAB` token, never document text. |
-| Return owner id / applied state / Cognito subject | **No.** Spiking `worklist_api._card` with `ownerId`, `appliedAt`, `applied`, `resumeText` and a canary: all five present upstream (control asserted), all five absent from all four public routes. |
-| Return a field the allowlist does not name | **No.** Same spike; the canary `LEAK-CANARY-9999` never appears. |
-| Rename an allowlisted field | **500 `public_projection_failed`**, `Cache-Control: no-store`. Fails closed. |
-| Turn a scalar into an object | **500**, and `SECRET-NOTE-777` planted inside it does not appear. |
-| Write anything | **No.** A full four-route sweep touches exactly `{'open_postings'}`. POST/PUT/PATCH/DELETE/HEAD/TRACE/CONNECT and their lowercase forms → 405, `store.calls == []`, `store.applied == {}`. |
-| Reach `POST /applied` by path | **No.** `/public/../applied` → 404. `/public/worklist/../../applied` → POST 405, GET 400 `missing_posting_id`. `/public/applied` → 404. `/PUBLIC/worklist` → 404. |
-| Verb-case bypass | **No.** `post`, `PoSt`, `DELETE` all → 405 before dispatch. Absent method defaults to GET, which is safe because only GET reaches a handler. |
-| Demo board in worklist or internships | **No**, in either, on the real corpus and on a synthetic demo tenant. |
-| Absurd `limit` | 999999999 / -5 / 0 / `abc` / `1e9` → 400 `invalid_limit`. 101 → 400. `MAX_LIMIT` = 100. |
-| Crafted cursor | Junk → 400 `invalid_cursor`. Forged fingerprint → 400 `cursor_filter_mismatch`. A worklist cursor on `/internships` and an internships cursor on `/worklist` are both refused — the collection is folded into the fingerprint. |
-| Malformed filter | `../../etc/passwd` → 400 `invalid_tier`; `'; DROP TABLE postings;--` → 400 `invalid_level`; `\x00\x01` → 200 with 0 matches; bad date → 400 `invalid_date`; `gate=../../` → 400 `invalid_gate`. |
-| Traversal in `{id}` | `../../applied`, `%2e%2e`, `' OR 1=1--`, `\x00`, 5,000 chars → 404 `posting_not_found`. |
-| Forged caller identity | Ignored. `authorizer.claims.sub = "ATTACKER-SUB"` plus a bearer header → 200 with no trace of it; `read_event` discards it and substitutes `public-unauthenticated`. The body carries no body, and the query is filtered to the 9-parameter allowlist (`evil` dropped from both containers). |
-| Cache poisoning via a cached error | Not possible. 200 → `public, max-age=300`; 400 / 404 / 405 / 500 → `no-store`. |
-
-Two behaviours that look like findings and are not:
-
-- **`GET /public/worklist/{id}` serves excluded postings**, including demo-board ones
-  (`kept: false`, with the gate and the quote). That is the trust surface working: the
-  exclusion ledger is browsable with evidence by design, and a detail card is how you
-  read one. The two *collections* are clean, which is the property that matters.
-- **`//public/worklist` and `/public/worklist/` return 200.** Path normalisation, not a
-  bypass — both resolve to the same template.
-
-### Layering, parity, publishability
+Not trusting that, I drove **900 real postings out of the local corpus** through both
+stores and diffed every view, page by page:
 
 ```
-$ grep -rn "from copilot.adapters" backend/src/copilot/domain/ backend/src/copilot/ports/
+driving 900 real postings through both stores
+view: 1725 rows, kept=19, internships=1
+summary identical: True
+  ats_vendor_demo_board              rows=   0/0    pages=  1/1   identical=True
+  citizenship_or_itar_restricted     rows= 143/143  pages= 21/21  identical=True
+  employer_will_not_sponsor          rows=  50/50   pages=  8/8   identical=True
+  internship_not_full_time           rows=   9/9    pages=  2/2   identical=True
+  internships                        rows=   1/1    pages=  1/1   identical=True
+  kept                               rows=  19/19   pages=  3/3   identical=True
+  not_a_software_role                rows= 793/793  pages=114/114 identical=True
+  security_clearance_required        rows= 114/114  pages= 17/17  identical=True
+  wrong_seniority_band               rows= 596/596  pages= 86/86  identical=True
+hydrated 19 ids identical: True
+  dynamodb: refuses an unknown view -> unknown screening view 'kepts'
+  sqlite:   refuses an unknown view -> unknown screening view 'kepts'
+MISMATCHED VIEWS: none
+```
+
+The DynamoDB double ran with a 37-item page size, so every walk crossed page boundaries.
+
+**A failed screen never leaves an authoritative view, in either store**, and the one
+difference between them is invisible through the port:
+
+```
+  dynamodb: previous view still current=True, doomed generation readable=1 rows
+  sqlite:   previous view still current=True, doomed generation readable=0 rows
+```
+
+SQLite materialises the row list before it opens a transaction, so a dying producer
+writes nothing. DynamoDB's `batch_writer` flushes its buffer on the way out of the `with`
+block, so orphan rows land. Neither is reachable — no summary names their generation, and
+the summary is the publish — but the DynamoDB orphans are only removed by TTL, which is
+why the TTL gap below was a real defect and not paperwork.
+
+### No Scan was introduced
+
+```
+$ grep -c "Scan" src/copilot/adapters/dynamodb_posting_store.py
+3
+  line 26:   "No query in this module is a Scan."          (docstring)
+  line 459:  kwargs["ScanIndexForward"] = False            (a query direction)
+  line 1037: "there is no Scan here."                      (docstring)
+
+$ grep -rn "\.scan(\|table.scan" src/
 (no matches)
-$ grep -rnE "^import (boto3|google|anthropic)" backend/src/copilot/domain/
-(no matches)
 ```
 
-The store parity suite is real and still covers both implementations: 77 tests in
-`backend/tests/test_dynamodb_posting_store.py`, parametrised
-`@pytest.fixture(params=["dynamodb", "sqlite"])`, and every case the port needs is
-there for both — an empty fetch does not mass-close, an empty description does not
-overwrite a real one, a reappearing posting reopens, `first_seen` is never overwritten,
-the interpretation cache survives a refetch and a close/reopen. The new work touches
-neither store (the public route calls `open_postings` and nothing else), so parity was
-not extended; it was confirmed.
+On the synthesised templates, every DynamoDB action granted anywhere:
 
 ```
-$ git check-ignore -q data/postings.db && echo ok     # ok
-$ git check-ignore -q private/ && echo ok             # ok
-$ git check-ignore -q .env && echo ok                 # ok
-largest tracked file: docs/index.html  1,211,327 bytes
-files over 100 MB reachable by git: none
-tracked files matching key/token/PEM/password patterns: none
-tracked files containing /Users/ashishk: none
+career-copilot:            ['BatchWriteItem', 'GetItem', 'PutItem', 'Query', 'UpdateItem']
+career-copilot-monitoring: []
 ```
 
-The published page carries no personal data: 0 occurrences of the personal email, of
-`private/`, of `ownerId` or `appliedAt`; `descChars: 0`; `prosePublished: false`; all
-861 `description` values `null`.
+Per function, which is the part that matters:
 
-**Nothing can auto-submit to an employer.** Exactly one outbound HTTP write exists in
-the entire backend:
+```
+CronFn      postings: BatchWriteItem, GetItem, PutItem, Query, UpdateItem
+            briefing: BatchWriteItem, PutItem
+WorklistFn  postings: GetItem, Query, UpdateItem
+PublicFn    postings: GetItem, Query            ← no write, no credential read
+ApiFn       briefing: Query
+```
 
-- `backend/src/copilot/adapters/ats/_http.py:46` — `urllib.request.Request(url, data=…)`,
-  the only function in the package that can send a body.
-- Its only caller is `backend/src/copilot/adapters/ats/workday.py:103`, which posts
-  `{"appliedFacets": {}, "limit": …, "offset": …, "searchText": …}` to Workday's job
-  *search* endpoint. A read spelled POST because that is the API Workday exposes.
+`dynamodb:Scan`, `dynamodb:GetRecords`, `ExportsOutput` and `Fn::ImportValue` are absent
+from both templates. **No fifth GSI was added** — the view is a base-table item
+collection, so the four indexes are unchanged, and `description` is projected only into
+`open-index`, which is the index the cron reads in order to screen.
 
-Nothing in `tools/` or `scripts/` makes an outbound write at all.
-`backend/tests/test_no_auto_submit.py` enforces this by AST walk over every shipped
-module rather than by grep (7 tests, passing), so `getattr(client, "po" + "st")` could
-not slip past it.
+### The public route holds under attack
+
+I spiked the upstream card — the thing the projection consumes — with `ownerId`,
+`appliedAt`, `applied`, `resumeText`, `cognitoSub` and a nested object, and loaded a
+résumé containing a canary email address and a canary phone number. Then I hit every
+public route and recursively scanned every string at every depth.
+
+```
+=== leak scan over every public route (upstream card spiked) ===
+  /public/worklist                    200    89248 bytes  prosePublished=False quoteMaxChars=180
+  /public/internships                 200    42380 bytes  prosePublished=False quoteMaxChars=180
+  /public/excluded                    200   453707 bytes  prosePublished=False quoteMaxChars=180
+  /public/excluded?gate=…demo_board   200    58888 bytes  prosePublished=False quoteMaxChars=180
+  /public/worklist/{id}               200     1434 bytes  prosePublished=False quoteMaxChars=180
+
+banned keys found:  none
+canary strings found (email, phone, résumé prose, any "CANARY"):  none
+`description` key at any depth:  none
+```
+
+Caps, measured over 600 real evidence quotes:
+
+```
+  quote         max=131  (cap 180)   n=600
+  reason        max=152  (cap 180)
+  levelWhy      max=52   (cap 180)
+  card identity max=197  (cap 400)
+```
+
+The only public string over 180 characters is `location`, twice, at 212 — a legitimate
+multi-city list, `BOUNDED` at 400 by design. No excerpt field approaches its cap.
+
+Non-`GET` is refused **before the store is touched** (the store was wrapped in a tripwire
+that records every method call):
+
+```
+  POST    /public/worklist         405 'method_not_allowed'     store calls=[]
+  PUT     /public/worklist         405 'method_not_allowed'     store calls=[]
+  DELETE  /public/excluded         405 'method_not_allowed'     store calls=[]
+  PATCH   /public/internships      405 'method_not_allowed'     store calls=[]
+  POST    /public/applied          404 'not_found'              store calls=[]
+  POST    /applied                 404 'not_found'              store calls=[]
+  HEAD    /public/worklist         405 'method_not_allowed'     store calls=[]
+```
+
+A full public sweep touches exactly three store methods:
+
+```
+  ['postings_by_id', 'screened_page', 'screening_summary']
+```
+
+Demo boards, walked to the end of both collections and checked against
+`domain.demo_boards.is_demo_tenant`:
+
+```
+  /public/worklist         811 rows  demo-board rows=0
+  /public/internships       48 rows  demo-board rows=0
+```
+
+### The not-ready state is fast and honest in every shape
+
+```
+A. empty store, corpus never screened
+  /worklist          503  'corpus_not_screened'   0.0103 ms
+  /internships       503  'corpus_not_screened'   0.0103 ms
+  /excluded          503  'corpus_not_screened'   0.0048 ms
+  /public/worklist   503  'corpus_not_screened'   0.0134 ms  Cache-Control='no-store'
+  …
+
+B. published view is 72 h old (VIEW_STALE_AFTER_HOURS=48)
+  /worklist          503  'screening_view_stale'  0.0260 ms
+  /public/worklist   503  'screening_view_stale'  0.0288 ms  Cache-Control='no-store'
+
+C. summary stamped 6 h in the future (clock skew)
+  → 503 'screening_view_stale' everywhere, 0.02 ms
+
+D. rows published, summary never written — the live-cron crash shape
+  (rows present without a summary: 1)
+  → 503 'corpus_not_screened' everywhere, 0.01 ms
+
+E. routes that must survive an unscreened corpus
+  GET /worklist/{id}         200
+  POST /applied              200
+  GET /public/worklist/{id}  200
+
+F. a view written by an older VIEW_VERSION
+  screening_summary() -> None
+  GET /worklist -> 503 {'error': 'corpus_not_screened'}
+```
+
+Never a 500, never a hang, never a 200 carrying zeroes. Errors are `no-store` on the
+public route, so a "not ready" cannot outlive the cron run that fixes it.
+
+### Both filtered-walk bounds actually fire
+
+```
+budget 0.2s             -> 503 {'error': 'filter_scan_too_slow'}     in 1117 ms
+max_rows 100 (view=811) -> 400 {'error': 'too_many_rows_to_filter'}  in 0.108 ms, store pages read = 0
+unfiltered read with max_rows=1 -> 200 (count=25)  — the bound only guards filters
+```
+
+The row bound refuses from the summary's own total before reading a single row. The
+budget's overshoot is exactly one page, as documented: 1.117 s from a 0.2 s budget is
+200 rows of scoring.
+
+### The published page's shape did not change
+
+I rebuilt `docs/index.html` from the real corpus and compared its boot object against the
+committed one, structurally:
+
+```
+BOOT key shape identical: True
+shape differences: none
+  itemCount:       811 -> 811
+  eligibleTotal:   811 -> 811
+  internshipTotal:  48 -> 48
+  funnel identical: True
+  builtAt:              2026-07-31T07:42:57 -> 2026-07-31T09:32:37
+  snapshot.generatedAt: 2026-07-31T07:42:57 -> 2026-07-31T09:31:36
+```
+
+Same 811 postings (same set), same funnel, every field the template reads still present.
+Two adjacent rows sharing an identical `posted_at` swapped places, and the new order is
+the correct one: the sort key is `<stamp>#<id>` descending, so ties break on id, and the
+committed page predates keyset ordering.
+
+`generatedAt` now means the *screening pass's* timestamp on the three list routes rather
+than "now" — a semantic change to a field whose name did not change. It is the right
+change (the old value claimed freshness for a pass that could be twenty hours old) and
+the page reads it as "screened at".
+
+### Reconciliation is intact
+
+On the wire, entirely from the summary, no count touching the corpus:
+
+```
+screened=25294 kept=811 excluded=24483 gateCountTotal=44299 overcount=True needsLevelCheck=631
+internship gate on the wire = 318
+internshipTotal on the wire = 48   (collection matched=48)
+```
+
+Both numbers ship in the same payload, so the 318-vs-48 gap is legible instead of looking
+like an off-by-270 bug.
 
 ---
 
 ## Broken / stubbed / half-done
 
-### 1. The entire credential tier was dead code in production — FIXED
+### 1. `?tier=` will answer 503 on the deployed store, and the reported number was wrong
 
-`backend/src/copilot/handlers/cron.py:63` (before the fix):
+`handlers/worklist_api.py`, `FILTER_SCAN_BUDGET_SECONDS`. **Highest-value finding, and the
+one the local timings hide.**
 
-```python
-mailbox=GmailMailbox(),
-llm=LlmReplyDrafter(api_key=settings.llm_api_key),
-```
-
-No resolver was passed to either consumer. So:
-
-- `adapters/ssm_secrets.py` (335 lines) and `ports/secrets.py` had **no caller in any
-  handler**. 45 tests passed against an adapter nothing constructed.
-- The stack granted the cron `ssm:GetParameter` on both key paths plus scoped
-  `kms:Decrypt`, and set `COPILOT_LLM_SECRET_ID` and `COPILOT_INTERPRETER_SECRET_ID` to
-  those paths — all correct, all unexercised.
-- The consequence in the cloud: `inbox_ok` could only ever be `false` and no reply could
-  ever be drafted, no matter which parameters Ashish created. Nothing would have failed.
-  IAM right, env vars right, adapter right, runtime never calling it.
-
-This is the same shape as the cron bug this project already ate once. A granted
-permission that nothing exercises is indistinguishable from a working feature in the
-console.
-
-### 2. Every card text field on the public route was unbounded — FIXED
-
-`backend/src/copilot/handlers/public_api.py:153` (before the fix) allowlisted `title`,
-`company`, `location` and `url` as plain scalars, while the module docstring claimed:
-
-> Every field that can carry posting text is marked `EXCERPT`, which caps it at
-> `QUOTE_MAX_CHARS` **by construction**.
-
-That was false for the four fields that carry the most posting text. Measured:
+The read agent reported `?tier=strong` at 4.17 s locally and projected "~7.8 s at the
+deployed size and still passes". That projection counts scoring only. On DynamoDB the
+filtered walk also hydrates every candidate row, and `postings_by_id` is **one GetItem per
+id** — a deliberate choice, documented in that method. I counted the round trips by
+instrumenting the in-memory double:
 
 ```
-5,000-char title/company/location through the real handler:
-  items[0].title    5020 chars   published in full
-  items[0].company  5005 chars   published in full
-  items[0].location 5007 chars   published in full
-  public body        16,245 bytes for ONE row
+read                                          st   Query  GetItem  round-trip @5ms
+GET /worklist?limit=25                       200      16       26          0.21 s
+GET /worklist?limit=100                      200      16       53          0.34 s
+GET /internships?limit=25                    200      16        4          0.10 s
+GET /excluded (7 gates, limit=10)            200     112       61          0.86 s
+GET /excluded (7 gates, limit=100)           200     112      523          3.17 s
+GET /worklist?level=entry (row filter)       200      16       20          0.18 s
+GET /worklist?ats=greenhouse (hydrates)      200      16       70          0.43 s
+GET /worklist?tier=strong (hydrates+scores)  200      16       54          0.35 s
 ```
 
-And it already fired on real data — a sweep of 44 public payloads found two strings over
-the stated cap, both `location`:
+At the deployed corpus the kept view is ~1,524 rows (47,538 × the measured 3.2% keep rate;
+the code's own docstring says ~1,520). That is 8 store pages — 8 × 16 = 128 Query calls —
+plus **1,524 GetItems**. At the adapter's own ~5 ms per call that is ~8.3 s of sequential
+round trips, on top of ~7.8 s of scoring: **~16 s, which the 12 s budget refuses.**
+
+So on the deployed store `?tier=` is expected to return 503 `filter_scan_too_slow`, while
+`?ats=` at ~8 s passes. This is the *designed* degradation — a named, bounded, retryable
+503 on one optional filter rather than a 29 s death — so requirement 1 still holds. But
+the docstring asserted the opposite, and the page sends `tier` whenever a visitor clicks a
+match-tier chip.
+
+**Fixed here:** the docstring now states the arithmetic and the expected 503; the page has
+a sentence for the code; and a test pins the one-GetItem-per-posting cost with the
+deployed-size arithmetic in its docstring, so the day someone batches it the win is
+measured rather than assumed.
+
+**Not fixed, deliberately, and this is the recommended next commit:** batch the hydrate.
+`BatchGetItem` takes 100 keys per call, turning 1,524 round trips into 16 and the whole
+tier scan into ~8 s. The adapter rejected it because `BatchGetItem` lives on the service
+resource rather than on a `Table`, which means holding a second boto3 object and growing
+the in-memory double a second read path. That is a real change with a real test cost and
+it deserves its own commit, not a footnote in a verification pass.
+
+Also note `GET /excluded?limit=100` — reachable from the public route — is 112 queries
+plus ~523 GetItems, ~3.2 s deployed, not the 2.88 ms measured locally. Still 9× under the
+ceiling, but it is the second-most expensive read and no report mentioned it.
+
+### 2. TTL was declared in the adapter and never enabled on the table — **fixed**
+
+`infra/lib/career-copilot-stack.ts:268`. The adapter writes `expires_at` on every one of
+~85,000 daily view rows and its docstring says "the table must have TTL enabled on that
+attribute". It was not:
 
 ```
-[strings over 180 chars] 2 found:
-  ('internships', '$.items[16].location', 212)
-  ('detail36',    '$.posting.location',   212)
+$ aws dynamodb describe-time-to-live --table-name career-copilot-postings --profile personal
+{"TimeToLiveDescription": {"TimeToLiveStatus": "DISABLED"}}
 ```
 
-Not an exploitable disclosure — an attacker cannot inject a posting, and the snapshot
-publishes these fields in full too. It is an unbounded response size on an open metered
-endpoint, and a docstring stating a guarantee the code did not provide, on the one file
-whose entire value is that its guarantee is exact.
+The materialisation agent flagged this as "needs someone else" and nobody was someone
+else. It is not cosmetic: the DynamoDB store demonstrably writes orphan rows when a
+publish dies part-way (proved above), and TTL is the only thing that removes them. Fixed,
+plus a CI check on the synthesised template — DynamoDB silently ignores TTL on an
+attribute no item carries, so a typo here is not an error, it is unbounded growth that
+nothing reports.
 
-### 3. `infra/build-lambda.sh` would ship an asset without the public handler — FIXED
+### 3. The page generator could not build the site — **fixed**
 
-`infra/build-lambda.sh:181` listed one entry per handler the stack points at, and
-`public_api.py` was not among them, though the stack already declared a function whose
-handler string is `copilot.handlers.public_api.handler`. The comment directly above that
-list describes the exact failure it was failing to catch:
-
-> A stale `build/` directory from the v1 script is indistinguishable from a good one at
-> `cdk deploy` time — the deploy succeeds and the Lambda 500s on import.
-
-Worst case for this particular handler: the public route is the one nobody is
-authenticated to notice is down, so a stale asset serves 502 to every visitor of
-jobs.ashishkosana.com while the authenticated app looks perfectly healthy.
-
-### 4. `Settings.llm_secret_id` / `interpreter_secret_id` defaulted to names that will never exist — FIXED
-
-`backend/src/copilot/config.py:42` and `:47` defaulted to `career-copilot/llm` and
-`career-copilot/interpreter` — Secrets Manager-shaped names — while the stack overrides
-them with SSM *paths*. Correct in the cloud, where the env var wins; locally they named
-a parameter that cannot exist and resolved to `""` forever.
-
-### 5. The level interpreter is wired nowhere — NOT FIXED, and should not be
-
-The port is vendor-neutral (`ports/interpreter.py` names no provider); the adapter module
-carries a vendor name in its filename, which is worth renaming for a public repo but is
-not what makes it broken.
-
-`backend/src/copilot/adapters/claude_interpreter.py` and
-`backend/src/copilot/ports/interpreter.py` exist with tests, and
-`DailyBriefingService` (`backend/src/copilot/services/daily_briefing.py:192`) has **no
-interpreter field**. `Settings.interpreter_api_key` and
-`Settings.interpreter_secret_id` are read by nobody. The stack creates a `CfnOutput`
-telling Ashish to create `/career-copilot/interpreter-api-key`, and creating it will
-change nothing.
-
-Concretely: 632 of the 813 worklist roles have `level: "unknown"`, and the tier that
-exists to resolve them never runs.
-
-Left alone deliberately. Wiring it is a design decision with a cost attached — when do
-you interpret, how many per run, what is the cache-miss budget — not a missing line. It
-should be its own change.
-
-### 6. The page↔API contract check does not run in CI
-
-`tools/ui/build_ui.py:593` `check_public_contract()` is a genuinely good check: it drives
-all four public routes through the real handler and asserts field names, `collection`
-values, `prosePublished`, `quoteMaxChars`, the cache and CORS headers, and recursively
-that no `description` key exists at any depth. It only runs inside `build_ui.py`, which
-needs `data/postings.db` — gitignored. So CI never runs it.
-
-The security-relevant half of that contract *is* covered in CI by
-`backend/tests/test_public_api.py`. What is uncovered is narrower and still real: a field
-renamed in `public_api`'s projection would show as `undefined` on the live page and no
-gate would catch it. Making it CI-runnable means driving it from an in-memory store
-instead of the corpus.
-
-### 7. Nothing of v2 is deployed — this is a bigger cutover than "already deployed" suggests
-
-Probed the live API directly:
+`tools/ui/build_ui.py`. The specified gate failed outright:
 
 ```
-$ curl "https://9iidni6dml.execute-api.us-east-1.amazonaws.com/prod/public/worklist?limit=1"
-HTTP 403  {"message":"Missing Authentication Token"}
-$ curl "https://9iidni6dml.execute-api.us-east-1.amazonaws.com/prod/worklist?limit=1"
-HTTP 403
+$ backend/.venv/bin/python tools/ui/build_ui.py --check-js
+build failed: GET /worklist returned 503: corpus_not_screened
+REAL_EXIT=1
 ```
 
-API Gateway returns that for an *unknown route*. The deployed stack is the v1
-briefing-only API: `/worklist`, `/worklist/{id}`, `/excluded`, `/internships`,
-`/applied` and all four `/public/*` routes are new, and `PostingsTable` does not exist
-yet. The published page will keep serving its snapshot and saying so — correctly — until
-the deploy lands, and the corpus in the cloud starts empty until the first cron run.
+The read path now requires a materialised view, the only thing in the repo that publishes
+one is the cron, and a laptop has no cron. So the live site could not be regenerated from
+the local corpus at all. The read agent's report claims these checkers "pass unmodified
+against the real corpus" — true only against a store it had pre-seeded out of band; the
+documented command does not work.
 
-The API id `9iidni6dml` is real in account 921888034384 and the stage is not replaced by
-this deploy, so the URL baked into the page at `tools/ui/build_ui.py:132` is correct and
-will start answering the moment the stack updates.
+Fixed: `build_ui.py` now publishes the view itself when there is none or the one there is
+stale, through the *production* builder (`services.daily_briefing.build_screening_view`
+plus the store's own `save_screening`), and reuses a good one. A hand-rolled view here
+would prove only that the page agrees with a shape the build script invented.
+
+### 4. The page shows visitors raw error codes — **fixed**
+
+`tools/ui/index.template.html`, `REASON_TEXT`. Four new API error codes shipped
+(`corpus_not_screened`, `screening_view_stale`, `filter_scan_too_slow`,
+`too_many_rows_to_filter`) and none had a sentence, so the page fell through to
+`'The API could not be used (corpus_not_screened).'` — a bare code on a public portfolio
+site, indistinguishable from a crash, which is the exact distinction those codes exist to
+make. The read agent asked for two of these in its handoff; there were four. All four now
+have prose.
+
+### 5. Containment made a hard cron failure silent, with nothing alarming on it — **fixed**
+
+`adapters/dynamodb_store.py:229` and `infra/lib/monitoring-stack.ts`. The v1-store agent
+correctly stopped `save_briefing`/`save_jobs` from sinking a run, logs
+`briefing_store_write_failed` at ERROR, and appends to a public `write_errors` list.
+Nothing reads `write_errors`, and there was no metric filter on that message. So the
+containment turned the exact failure that killed the first live run into one that produces
+a **green** `CronFailed` alarm and no notification at all. Its report says the log shape
+means "the infra owner can alarm on it with no code change" — possible, not done.
+
+Fixed: a `career-copilot-BriefingWriteFailed` metric filter and alarm, verified in the
+synthesised monitoring template. (`screen_skipped` needs no new alarm — a failed publish
+reports `kept: 0`, which `EligibleWorklistTooSmall` already catches.)
+
+### 6. `domain/screening.screen_all` raises on a naive `posted_at` — **fixed**
+
+`domain/screening.py:305`. `kept.sort(key=lambda d: d.posting.posted_at or _EPOCH)` mixes
+an aware sentinel with whatever tzinfo an ATS supplied:
+
+```
+TypeError: can't compare offset-naive and offset-aware datetimes
+```
+
+Reproduced with three real-shaped postings. Not on any production path — `daily_briefing`
+documents avoiding this function for exactly this reason — but it is an exported domain
+function that only its own tests keep alive, and "we route around the broken one" is not a
+state to ship. It hides well: a one-element sort never compares anything, so it needs two
+kept postings *and* mixed offsets. Fixed with the same coercion the service uses, plus a
+test that also asserts the naive posting still sorts in the right place.
+
+### 7. A filtered walk could silently truncate `matched` — **fixed**
+
+`handlers/worklist_api.py`, `_walk_view`. The page loop ended by falling out of
+`for _ in range(_MAX_SCAN_PAGES)` and returning what it had. Unreachable today — the view
+is refused above `FILTER_SCAN_MAX_ROWS` and the bound covers that many rows with two pages
+to spare — but the only way to get there is a store returning short pages while promising
+more, and then `matching` is *incomplete* and gets reported as an exact `matched`. A
+silently wrong number on the trust surface is the failure this whole rewrite exists to
+remove. Now a logged 503, with a test that drives a store which promises another page
+forever.
+
+### 8. Not defects, but say them out loud
+
+- **`docs/index.html` at HEAD was built by the 504-ing code.** Its `generatedAt` equals
+  its `builtAt`, which only happens when `generatedAt` is "now" — the pre-materialisation
+  behaviour. The live site is currently a snapshot from a build whose live path 504s.
+- **`screen_all` has no production caller.** 21 lines of exported domain code kept alive by
+  its own tests. Either give it the one caller it deserves or delete it.
+- **`store.write_errors` has no reader.** The alarm now covers the operational hole, but
+  `DailyRun` still cannot say "the briefing did not store", so `cron_complete` reports
+  `ok: true` for a run that lost its briefing.
+- **`data/watchlist.json` went 819 → 818 companies.** Verified: the removed entry is
+  Squarepoint Capital with `tenant: "embed"`, which is not a Greenhouse tenant. Correct
+  removal.
+- **The authenticated routes send no `Cache-Control` at all**, so a browser may apply
+  heuristic caching to them; only the public route sets a policy. Low stakes — that surface
+  is one user behind Cognito — but it is an asymmetry, not a decision anyone wrote down.
+- **`VIEW_STALE_AFTER_HOURS = 48` means two consecutive cron failures take the public site
+  to 503.** That is the intended trade — an honest 503 over a silently stale page — but it
+  makes the published site hard-dependent on a daily Lambda, and `CronDidNotRun` is the
+  only warning before the site goes dark.
 
 ---
 
-## Which agent reports overstated what they delivered
+## Which agent report overstated what
 
-**core:api** — two overstatements, one of which was a real defect.
+**`read:handlers`** — three overstatements, one of them material.
 
-1. The module docstring's claim that "every field that can carry posting text is marked
-   `EXCERPT`" was false for `title`, `company`, `location` and `url`. Defect 2 above.
-2. "Excerpt caps proven on a 640-char title (`reason` **and** `quote` == 180 chars
-   ending `…`)". Both derived fields were capped. The `title` on the same row was
-   published at its full 5,032 characters, in the same payload, next to the capped
-   quote. The test proved the two fields it looked at.
+1. "`tools/ui/build_ui.py`'s own checkers pass unmodified against the real corpus." They do
+   not. The documented command exits 1 with `corpus_not_screened` against
+   `data/postings.db`. It passes only against a store pre-seeded out of band, which the
+   report does not mention.
+2. "`?tier=` … ~7.8 s at the deployed size and still passes." Counts scoring and omits
+   ~8.3 s of DynamoDB hydration round trips. The realistic figure is ~16 s, which its own
+   12 s budget refuses. The bound is well designed; the projection through it was not
+   checked.
+3. "(a) the UI needs sentences for `corpus_not_screened` and `screening_view_stale`." It
+   introduced **four** new error codes. The other two also reach the page.
 
-Everything else in that report checks out, including the numbers: 813 / 20 / 48 / 5,
-zero overlap, zero demo boards, `set(store.calls) == {"open_postings"}`, the
-cross-collection cursor refusal, and the 405-before-dispatch. The 270-posting
-reconciliation is right in substance; "264 are not software roles" measures 265 here,
-which is a rounding-level discrepancy in a number that is explanatory, not load-bearing.
+Everything else in that report reproduced, including every timing to within a few percent
+and the two structural assertions that keep `open_postings` out of the read path. The
+`IndexCache` handoff it asked for is done — the alias is deleted and the tool constructs
+`SummaryCache`.
 
-**core:secrets** — honest about the blocker, wrong about who would clear it.
+**`core:materialize`** — accurate, and its "needs someone else" list was a live grenade.
+Every measured number reproduced exactly: 45,158 rows, 1.79 rows/posting, 811/48/318,
+44,299 gate fires, 0.40 s to save, sub-millisecond summary read, 16 queries per page. The
+overstatement is one of framing: "Nothing breaks without it" for the TTL is wrong in
+combination with its own design. Its DynamoDB store writes orphan rows on a failed publish
+— I reproduced that — and TTL is the only reaper. Left disabled it is not "~36 MB per
+stale day", it is monotonic growth of unreadable rows for the life of the table.
 
-The report said the wiring was "Blocked on the handler-wiring agent (I did not touch
-`handlers/cron.py`)". There was no handler-wiring agent. So the port, the adapter, the
-IAM grants and the env vars all shipped, and nothing connected them: the feature was
-100% dead in production and the report reads as though delivery were imminent. The
-report also flagged the `config.py` default drift and the two missing `__all__` entries
-correctly, and then left all three for a reader who might not exist. Reporting a
-dependency is not the same as the dependency being owned by someone.
+**`core:v1store`** — accurate and well tested. I confirmed both key schemas read-only
+(`career-copilot` is `PK`/`SK` with 8 items, `career-copilot-postings` is `pk`/`sk` with 4
+GSIs) and the adapter now uses the right ones with `overwrite_by_pkeys`. The overstatement
+is the containment handoff: "the infra owner can alarm on it with no code change" reads as
+covered when it means possible. Its own report names silent containment as how the bug
+survived, and it then shipped a silent containment with no alarm and no reader for
+`write_errors`. Fixed here.
 
-Also, "**Nothing in the credential path raises**" is true of `api_key` and
-`secret_json` and false of `GmailMailbox.fetch_recent`, which raises `RuntimeError`
-when no credential resolves. The containment is real one layer up; the sentence is too
-broad.
-
-**wire:cdk** — accurate. Every count independently reproduced from the synthesized
-templates: 16 `NONE` (12 OPTIONS MOCKs + exactly the 4 public GETs), 6
-`COGNITO_USER_POOLS`, 6 `AuthorizerId` refs, `dynamodb:Scan` 0, 5 stage
-`MethodSettings` (`/*` at 20/60 and four public at 3/20), `ReservedConcurrentExecutions`
-10 on the public function only, 14 alarms, 0 `Fn::ImportValue`, and the public role
-holding exactly `[dynamodb:Query, dynamodb:GetItem]` on the table and `/index/*`. The
-`/public` CORS override is really `GET,OPTIONS` / `Content-Type` on all five public
-resources. The account-resolution hazard is real and reproduced: synth without
-`--profile personal` emits SSM ARNs for **425680120934**. The report's own finding 2
-noted `build-lambda.sh`'s required-files gap and left it to "that file's owner"; nobody
-owned it.
-
-**wire:ui** — accurate, with one claim that has since gone stale.
-
-"`/public/*` is not in `career-copilot-stack.ts` yet" was true when written and is now
-false — wire:cdk added it. The *conclusion* still holds for a better reason: the page
-falls back today because the routes are not **deployed**, not because they are not in
-the stack. Verified counts all reproduce from `docs/index.html`: 813, 20 exact, 48
-internships, 318 gate fired, 0 overlap, 0 demo rows, `descChars: 0`,
-`prosePublished: false`, `apiPublic: true`, exactly one `method: 'POST'` in the page
-behind the `read_only` runtime guard.
+**All three** reported "all gates green" while `build_ui.py --check-js` — a gate in the
+brief — exited 1. Two of them could not have known; the read agent should have.
 
 ---
 
 ## What I fixed myself
 
-All in files the component agents were not allowed to touch, except the two defects
-inside `public_api.py` and its test file, which had no owner left.
-
-| File | Change |
+| file | change |
 |---|---|
-| `backend/src/copilot/handlers/cron.py` | Build one `AwsSecrets` per invocation and pass it to `GmailMailbox` and `LlmReplyDrafter`. Docstring explains per-invocation rather than module-level (a warm container would keep serving a rotated key) and that keyless stays whole. |
-| `backend/src/copilot/config.py` | `llm_secret_id` → `/career-copilot/llm-api-key`, `interpreter_secret_id` → `/career-copilot/interpreter-api-key`, matching what the stack sets. Comments now say which store each id belongs to and why. |
-| `backend/src/copilot/handlers/public_api.py` | New `Bounded` spec marker and `CARD_TEXT_MAX_CHARS = 400`; `title`/`company`/`location` truncate at it, `url` fails closed instead (a shortened sentence is still true, a shortened URL is a lie). Docstring rewritten to state the two caps and why there are two, replacing the claim that was not true. |
-| `backend/src/copilot/ports/__init__.py` | Export `SecretsPort`. |
-| `backend/src/copilot/adapters/__init__.py` | Export `AwsSecrets`. |
-| `infra/build-lambda.sh` | Add `copilot/handlers/public_api.py` and `copilot/adapters/ssm_secrets.py` to the required-files list, with a comment on why the public handler is the worst one to omit. |
-| `.github/workflows/ci.yml` | New job step asserting five public-route invariants over the **synthesized template**: only GETs under `/public` may be unauthenticated, the 6 Cognito methods are still 6, the public IAM policy contains no write/`ssm:`/`secretsmanager:`/`kms:`/`Scan`, the public methods and the stage are throttled, and the public function has reserved concurrency. Both directions negative-tested (making `/excluded` open, and adding `PutItem` to the public policy, each fail it). |
-| `backend/tests/test_handlers.py` | `TestTheCredentialPortIsActuallyWired`, 6 tests. The old test asserted `isinstance(service, DailyBriefingService)`, which stayed true throughout the outage; these assert the edges that carry credentials, that one resolver is shared per invocation and a fresh one per run, that the secret ids match the stack, and that building the service reads nothing. |
-| `backend/tests/test_public_api.py` | 4 tests for the new bound: a 5,000-char field truncates at 400, a real 24-city location under the bound is published whole, an oversized `url` raises, and — as a property over a whole-payload string walk — nothing on the wire exceeds the bound. Plus the existing scalar-grows-a-body test parametrised across four fields, because moving `location` to `BOUNDED` changed which branch checks it and would have left the `_scalar` guard untested. |
+| `infra/lib/career-copilot-stack.ts` | `timeToLiveAttribute: "expires_at"` on the postings table, with the reasoning and the "TTL on a missing attribute is silently ignored" trap written down |
+| `infra/lib/monitoring-stack.ts` | `BriefingWriteFailed` metric filter + alarm on the contained write failure `CronFailed` can no longer see |
+| `.github/workflows/ci.yml` | new **`page`** job: seeds a store, builds both pages through the real handlers, `--check-js`, then asserts the page is not empty. Plus `tools/**` in the triggers and a template check that the view's TTL stays enabled |
+| `tools/ui/seed_demo_store.py` | new. ~15 postings chosen so the page's invariants are non-trivial in CI: enough kept to page, one software internship, one posting failing two gates, one with no description, one demo board |
+| `tools/ui/build_ui.py` | publishes the screening view when there is none or it is stale, via the production builder; reuses a good one; moved to `SummaryCache`; stale docstring corrected |
+| `tools/ui/index.template.html` | prose for all four new API error codes |
+| `handlers/worklist_api.py` | `_walk_view` refuses instead of returning a truncated `matched`; the `FILTER_SCAN_BUDGET_SECONDS` docstring corrected with the deployed round-trip arithmetic; `IndexCache` alias deleted |
+| `domain/screening.py` | `screen_all` no longer raises on a naive `posted_at` |
+| `tests/test_screening.py` | `test_one_naive_posted_at_does_not_take_the_whole_batch_down` |
+| `tests/test_worklist_api.py` | `test_a_walk_that_never_finishes_refuses_rather_than_reporting_a_short_count`; the `IndexCache` alias test inverted to assert it is gone |
+| `tests/test_dynamodb_posting_store.py` | `test_hydrating_is_one_get_item_per_posting_and_that_is_the_cost_to_beat` — pins the cost behind finding 1 |
+| `docs/index.html` | rebuilt, so the published page carries the new error sentences |
 
-Rejected on purpose: wiring `ClaudeInterpreter` (a design decision with a cost budget,
-not a missing line — see Broken item 5), and moving `check_public_contract` into CI
-(worth doing, needs an in-memory driver, not a five-minute change).
++3 tests, 853 → 856. Every gate re-run and green.
 
-Note on the CI step: it duplicates guards the stack already enforces at synth time. That
-is intentional. The synth guards live in the same file as the routes they check, so one
-commit can relax both; this one cannot be edited by a change to
-`career-copilot-stack.ts`.
+The new CI `page` job was run locally, step for step, exactly as written:
+
+```
+$ python tools/ui/seed_demo_store.py "$RUNNER_TEMP/ci-postings.db"
+seeded /tmp/ci-sim/ci-postings.db: 15 new, 0 already known
+
+$ COPILOT_POSTINGS_DB_PATH=… python tools/ui/build_ui.py --check-js --local-out … --public-out …
+screening view: none published — screening the local corpus (~40 s)
+screening view: published 18 rows over 15 postings — 9 eligible, 1 internships, 6 excluded
+public read API contract: 4 routes OK under /public
+snapshot holds 9 of 9 eligible roles
+internships: 1 software internships, from 2 postings the internship gate removed
+
+$ (the built page is not empty check)
+page holds 9 of 9 eligible roles and 1 internships, screened 15
+EXIT=0
+```
+
+Note what that job honestly does *not* catch: the original 504 was a scaling failure,
+invisible at any corpus a runner can hold. The guard for that one is the call-log and AST
+assertions in the test suite. This job guards the class of break that happened next — the
+page generator answering 503 on every route while every other gate was green.
 
 ---
 
-## The exact steps left for Ashish
+## Exactly what Ashish must do next
 
-### 0. The default AWS profile points at the WRONG ACCOUNT
+### 0. Check which account you are pointed at. This has bitten before.
 
 ```
+$ aws sts get-caller-identity            # your DEFAULT profile
+{"Account": "425680120934", …}           ← WRONG ACCOUNT
+
 $ aws sts get-caller-identity --profile personal
-"Account": "921888034384"     ← career-copilot lives here
-default profile                → 425680120934     ← someone else entirely
+{"Account": "921888034384", "Arn": "arn:aws:iam::921888034384:user/ashish-cli"}   ← correct
 ```
 
-Every command below carries `--profile personal`. Without it, `cdk synth` silently emits
-SSM ARNs for 425680120934 and a deploy fails on the bootstrap/credential mismatch rather
-than mis-deploying — a review hazard, not a security one, but any synth whose ARNs you
-intend to *read* must pass the profile too.
+Your default profile is a different account. Every command below names `--profile
+personal` (or `AWS_PROFILE=personal`) explicitly. Do not drop it.
 
-### 1. Create the three credentials (all optional; the 813-posting funnel needs none)
+### 1. Review the diff, then commit it
 
-Neither SSM parameter exists yet — confirmed by name only, no value read:
+The tree is dirty and uncommitted on purpose — 26 files. Read `handlers/worklist_api.py`,
+`ports/postingstore.py` and the two store adapters before committing: you have to be able
+to defend the record shape (one row per *(posting, view)* pair, and why screening is
+materialised while scoring is not).
 
-```
-$ aws ssm describe-parameters --profile personal --region us-east-1
-/cdk-bootstrap/hnb659fds/version      ← the only parameter in the account
-```
-
-| Id | Store | Type | Unlocks |
-|---|---|---|---|
-| `/career-copilot/interpreter-api-key` | SSM Parameter Store | **SecureString** | nothing yet — the interpreter is unwired (Broken item 5). Create it when that lands. |
-| `/career-copilot/llm-api-key` | SSM Parameter Store | **SecureString** | reply drafting |
-| `career-copilot/gmail` | Secrets Manager | JSON with `refresh_token`, `client_id`, `client_secret` | the inbox half / `inbox_ok: true` |
-
-`career-copilot/gmail` already exists and holds the empty CloudFormation placeholder, so
-the inbox stays off until you put a real document into it. Note that this deploy changes
-its removal policy from `Delete` to `Retain`, so it will survive a future stack delete.
-
-### 2. Deploy
+### 2. Build the Lambda asset and deploy
 
 ```bash
-cd /Users/ashishk/projects/career-copilot/infra
-./build-lambda.sh                      # required: synth refuses a stale asset
-npx cdk deploy career-copilot career-copilot-monitoring \
-  --profile personal \
+cd ~/projects/career-copilot/infra
+./build-lambda.sh
+AWS_PROFILE=personal npx cdk deploy --all \
   -c myEmail=<your email> \
   -c ownerUserId=<your Cognito sub> \
   -c alarmEmail=<your email>
 ```
 
-`myEmail` and `ownerUserId` are mandatory — the stack throws at synth on a blank one,
-because blank means "do not email me" and "store the briefing under a user id no
-authenticated read can match", and both are silent failures.
+All three context values are required — the stack throws at synth on a blank `myEmail` or
+`ownerUserId`, because a blank means "do not email me" and "store the briefing under a
+user id no authenticated read can match", and both are silent.
 
-**What this deploy destroys and replaces** — from a real `cdk diff` against the live
-stack, not from reading the TypeScript:
+This deploy carries: the materialised-view read path, the v1 key-schema fix that killed
+the first live run, TTL on the postings table, and the new
+`career-copilot-BriefingWriteFailed` alarm. Confirm the SNS email subscription if you have
+not — until you click it, alarms notify nobody.
+
+### 3. Then wait for a cron run. **The API returns 503 until one completes.**
+
+This is the part that is easy to misread as a failed deploy. The live corpus holds 47,538
+postings and **no screening view** — the read path is not going to invent one. Immediately
+after deploying, every list route answers
 
 ```
-[-] AWS::SecretsManager::Secret  ClaudeSecret          destroy   ← career-copilot/anthropic
-[-] AWS::SecretsManager::Secret  ApifySecret           destroy   ← career-copilot/apify
-[-] AWS::ApiGateway::Deployment  Api/Deployment        destroy
-[~] AWS::Lambda::Function        CronFn                replace
-[~] AWS::Events::Rule            DailyRule             replace
-[~] AWS::Lambda::Function        ApiFn                 replace   ← not in the brief's list
-[~] AWS::Lambda::Permission      DailyRule/AllowEventRule…  may be replaced
-[~] AWS::SecretsManager::Secret  GmailSecret           Delete → Retain
-[~] AWS::ApiGateway::Stage       Api/DeploymentStage.prod   modified, NOT replaced
-[+] AWS::DynamoDB::Table         PostingsTable
-[+] AWS::Lambda::Function        WorklistFn, PublicFn
-[+] 4 public GET methods, 5 authenticated methods, 3 log groups, PublicApiUrl output
+503 {"error": "corpus_not_screened"}
 ```
 
-Both `career-copilot/anthropic` and `career-copilot/apify` exist in the account today
-and **will be deleted**. If either holds a key you still want, copy it out first — this
-is the one irreversible part of the deploy. `ApiFn` being replaced is real and is not in
-the brief's list.
+in about 10 microseconds. That is correct behaviour, not a broken deploy. The view is
+built by the cron, once a day. Either wait for the schedule or trigger a run yourself —
+that is a mutation, so it is yours to run, not mine.
 
-Because the stage is modified rather than replaced, the API keeps id `9iidni6dml` and
-the URL baked into `tools/ui/build_ui.py:132` starts answering immediately.
+The run should take ~600 s of its 900 s: ~426 s of board sweep, ~10 s to read the corpus,
+~73 s to screen 47,538, and ~3,400 `BatchWriteItem` requests to publish ~85,000 rows. Peak
+memory ~1 GB of 2048. In the `cron_complete` log line expect `screen_skipped: ""` and
+`view_rows` near 85,000; `screened` non-zero with `view_rows: 0` means the screen worked
+and the publish did not, which is a different fault with a different fix.
 
-### 3. DNS for jobs.ashishkosana.com (Namecheap)
-
-`docs/CNAME` already contains `jobs.ashishkosana.com`. In Namecheap → Domain List →
-`ashishkosana.com` → Manage → Advanced DNS → Add New Record:
-
-| Type | Host | Value | TTL |
-|---|---|---|---|
-| CNAME | `jobs` | `ashishkosana.github.io.` | Automatic |
-
-Then GitHub → repo Settings → Pages → Custom domain → `jobs.ashishkosana.com` → Save,
-wait for the DNS check, then tick **Enforce HTTPS**. The page is served by GitHub Pages
-and calls the API Gateway URL cross-origin, which the `/public` CORS override allows
-(`GET, OPTIONS` / `Content-Type`, origin `*`).
-
-This CNAME points only at GitHub Pages. It does **not** front the API — the page calls
-`execute-api.us-east-1.amazonaws.com` directly. If you later put a custom domain on the
-API, `PUBLIC_API_BASE` at `tools/ui/build_ui.py:132` is the one line to change; until
-then the page falls back to its snapshot and says so in words.
-
-### 4. Confirm the cutover
+### 4. Verify the read is actually fixed
 
 ```bash
-# The public route answers, and answers with no prose:
-curl -s "https://9iidni6dml.execute-api.us-east-1.amazonaws.com/prod/public/worklist?limit=1" \
-  | python3 -m json.tool | head -30
-
-# It is 403 "Missing Authentication Token" today — that is the route not existing yet.
-
-# The authenticated route still demands a token:
-curl -s -o /dev/null -w "%{http_code}\n" \
-  "https://9iidni6dml.execute-api.us-east-1.amazonaws.com/prod/worklist"   # expect 401
-
-# The corpus starts EMPTY in the cloud. Run the cron once, or wait for DailyRule:
-aws lambda invoke --profile personal --function-name <new CronFn name> /tmp/out.json
+curl -s -o /dev/null -w "HTTP %{http_code}  %{time_total}s\n" \
+  "https://<api>/prod/public/worklist?limit=25"
 ```
 
-Until that first cron run, `/public/worklist` will correctly answer with 0 items — the
-page will fall back to its snapshot and say the API answered but held nothing. That is
-the honest state, not a bug, but it means **rebuild the page after the first successful
-cron run**, not before:
+Expect `HTTP 200` in well under a second. A 504 means you are still on the old bundle. A
+503 `corpus_not_screened` means step 3 has not happened yet.
+
+### 5. Republish the page
 
 ```bash
+cd ~/projects/career-copilot
 backend/.venv/bin/python tools/ui/build_ui.py --check-js
 ```
 
-Nothing in this review was committed. The tree is dirty; the commits are yours.
+The committed `docs/index.html` was built by the 504-ing code path. Rebuilding also picks
+up the four new error sentences, which is what lets the live site say "nothing has been
+screened yet" instead of showing a visitor a raw error code.
+
+### 6. Optional, and the best next commit
+
+Batch the hydrate in `DynamoDbPostingStore.postings_by_id` (`BatchGetItem`, 100 keys per
+call). It turns 1,524 sequential round trips into 16 and is the difference between
+`?tier=` working and `?tier=` answering `filter_scan_too_slow` on the deployed corpus. The
+test added in this pass measures the before, so the after is provable.

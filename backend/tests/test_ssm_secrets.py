@@ -492,29 +492,35 @@ def test_secret_value_is_never_logged() -> None:
 _EMAIL = Email(sender="recruiter@acme.com", subject="Interview", snippet="free next week?")
 
 
-class _FakeGenaiModels:
+class _FakeSdkMessages:
     def __init__(self, text: str) -> None:
         self._text = text
 
-    def generate_content(self, *, model: str, contents: str) -> Any:
-        return type("_Resp", (), {"text": self._text})()
+    def create(self, **kwargs: Any) -> Any:
+        block = type("_Block", (), {"type": "text", "text": self._text})()
+        return type("_Resp", (), {"content": [block]})()
 
 
-class _FakeGenaiClient:
+class _FakeSdkClient:
     def __init__(self, *, api_key: str) -> None:
         self.api_key = api_key
-        self.models = _FakeGenaiModels("Happy to chat.")
+        self.messages = _FakeSdkMessages("Happy to chat.")
 
 
-def _fake_genai_module(built: list[_FakeGenaiClient]) -> Any:
-    """A stand-in for ``google.genai`` that records the key it was constructed with."""
+def _fake_sdk_module(built: list[_FakeSdkClient]) -> Any:
+    """A stand-in for ``anthropic`` that records the key it was constructed with.
 
-    def client(*, api_key: str) -> _FakeGenaiClient:
-        made = _FakeGenaiClient(api_key=api_key)
+    The entry point is ``Anthropic(api_key=...)``, not the previous vendor's
+    ``Client(api_key=...)``. Named here because a fake with the old attribute made
+    the adapter's own construction line unreachable while the test still passed.
+    """
+
+    def client(*, api_key: str) -> _FakeSdkClient:
+        made = _FakeSdkClient(api_key=api_key)
         built.append(made)
         return made
 
-    return type("_Genai", (), {"Client": staticmethod(client)})
+    return type("_Sdk", (), {"Anthropic": staticmethod(client)})
 
 
 def test_drafter_key_from_the_store_reaches_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -523,8 +529,8 @@ def test_drafter_key_from_the_store_reaches_the_sdk(monkeypatch: pytest.MonkeyPa
     Asserting the drafted body alone would pass while the SDK was handed ``""``,
     so the test checks the key the client was actually built with.
     """
-    built: list[_FakeGenaiClient] = []
-    monkeypatch.setattr(llm_mod, "import_module", lambda name: _fake_genai_module(built))
+    built: list[_FakeSdkClient] = []
+    monkeypatch.setattr(llm_mod, "import_module", lambda name: _fake_sdk_module(built))
     secrets = _FakeSecrets({LLM_PARAM: _KEY})
     drafter = LlmReplyDrafter(secrets=secrets, secret_id=LLM_PARAM)
 

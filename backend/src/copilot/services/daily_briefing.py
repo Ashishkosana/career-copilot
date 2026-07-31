@@ -4,8 +4,9 @@ Two independent halves run here, and they fail independently:
 
 * **Inbox** — fetch → triage → draft replies. Replies are created as DRAFTS,
   never auto-sent; a draft that fails to generate is skipped, not raised.
-* **Supply** — fetch the watchlist → screen → sync to the posting store → close
-  what vanished → score what survived.
+* **Supply** — fetch the watchlist → sync to the posting store → close what
+  vanished → screen the whole stored corpus once → **publish that screening as a
+  materialised view** → score the handful of roles that reach the digest.
 
 "Independently" is load-bearing and used not to be. ``run`` called
 ``mailbox.fetch_recent`` as its first statement, and ``GmailMailbox`` with no
@@ -21,6 +22,18 @@ so it always fell through to a bundled 4-row fixture and the briefing rendered
 invented companies as real matches. It now reads real ATS boards, and the run
 summary carries every count, so "no roles today" can never again be
 indistinguishable from "no source configured".
+
+**The screen belongs here, once a day, and nowhere else.** It used to run again on
+every public read, over the whole corpus, because the funnel counts describe the
+whole set. Measured: 2.2 s to read 25,294 rows, 38.1 s to screen and
+shape them (1.506 ms a posting) — i.e. ~72 s at the deployed 47,538 — against a
+29 s API Gateway ceiling, so every single read 504'd, ``?limit=1`` included.
+
+The cron has 900 s and the board sweep uses ~426 s of it. The screen is ~72 s, the
+corpus read ~10 s over the wire, and publishing ~84,900 rows is ~3,400
+BatchWriteItem requests, so the run lands near 600 s — it fits, with margin, and it
+turns a read into an O(page) lookup (8.7 ms measured: summary + page + hydrate). See
+:func:`build_screening_view` and :mod:`copilot.ports.postingstore`.
 
 **No LLM is required for supply.** Interpreting an ambiguous posting is a
 separate, cached concern (``ports.interpreter``), so a daily run needs no API
@@ -42,13 +55,26 @@ from copilot.domain.briefing import build_briefing, render_markdown
 from copilot.domain.gap import build_report, score_report
 from copilot.domain.models import Briefing, Email, Job, TriagedEmail
 from copilot.domain.posting import Posting
-from copilot.domain.screening import ScreenDecision, ScreenReport, screen
+from copilot.domain.screening import (
+    Exclusion,
+    ScreenDecision,
+    ScreenReport,
+    is_internship,
+    screen,
+)
 from copilot.domain.seniority import JUNIOR_BANDS, Level, LevelSource
 from copilot.domain.triage import triage_all
 from copilot.logging import get_logger
 from copilot.ports import LLMPort, MailboxPort, StorePort
 from copilot.ports.postingsource import PostingSourcePort
-from copilot.ports.postingstore import PostingStorePort
+from copilot.ports.postingstore import (
+    VIEW_INTERNSHIPS,
+    VIEW_KEPT,
+    PostingStorePort,
+    ScreenedRow,
+    ScreenSummary,
+    cap_quote,
+)
 
 #: Sorts undated postings last without dropping them.
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -139,6 +165,181 @@ def _error_label(exc: BaseException) -> str:
     return message[:MAX_ERROR_CHARS]
 
 
+# ---------------------------------------------------------------------------
+# The materialised screening view
+# ---------------------------------------------------------------------------
+
+#: Which eligibility evidence key explains which gate. Same mapping the read API
+#: uses; the gates whose evidence is not in ``Eligibility`` are handled by name.
+_ELIGIBILITY_EVIDENCE_KEY: dict[Exclusion, str] = {
+    Exclusion.CLEARANCE: "clearance",
+    Exclusion.CITIZENSHIP: "citizenship",
+    Exclusion.NO_SPONSORSHIP: "no_sponsorship",
+}
+
+
+@dataclass(frozen=True)
+class ScreeningView:
+    """One screening pass over the stored corpus, ready to publish and to read.
+
+    Carries both shapes on purpose: the decisions the digest needs today, and the
+    rows/summary the read path serves for the next 24 hours. They come from **one**
+    pass, which is the property that makes the funnel counts and the evidence shown
+    on a card describe the same screening.
+    """
+
+    kept: tuple[ScreenDecision, ...]
+    internships: tuple[ScreenDecision, ...]
+    report: ScreenReport
+    rows: tuple[ScreenedRow, ...]
+    summary: ScreenSummary
+
+
+def _quote_for(decision: ScreenDecision, gate: Exclusion) -> str:
+    """The text that tripped one specific gate, capped.
+
+    Addressed per gate rather than taken from the first exclusion: a posting
+    routinely fails several gates at once, and a grouped view must show the
+    evidence for the gate it is displaying.
+    """
+    posting = decision.posting
+    if gate is Exclusion.NOT_SWE:
+        return cap_quote(posting.title)
+    if gate is Exclusion.INTERNSHIP:
+        # The two signals disagree often — 27 postings carry it only in the title
+        # and 22 only in the ATS employment type — so quote whichever fired.
+        return cap_quote(
+            posting.title if is_internship(posting.title) else posting.employment_type
+        )
+    if gate is Exclusion.LEVEL:
+        verdict = decision.level_verdict
+        return cap_quote(verdict.evidence) if verdict is not None else ""
+    key = _ELIGIBILITY_EVIDENCE_KEY.get(gate)
+    if key is None:
+        # DEMO_BOARD has no quotable phrase: the evidence is the tenant slug, and
+        # ``reason`` already names it. An empty quote is the honest answer, not a
+        # missing one.
+        return ""
+    return cap_quote(dict(decision.eligibility.evidence).get(key, ""))
+
+
+def _row(decision: ScreenDecision, *, view: str, gate: Exclusion | None) -> ScreenedRow:
+    posting = decision.posting
+    verdict = decision.level_verdict
+    return ScreenedRow(
+        posting_id=posting.id,
+        view=view,
+        posted_at=posting.posted_at,
+        kept=decision.kept,
+        level=decision.level.value,
+        level_source=verdict.source.value if verdict is not None else LevelSource.NONE.value,
+        level_why=verdict.explain() if verdict is not None else "",
+        eligibility_checked=decision.eligibility.checked,
+        sponsorship=decision.eligibility.sponsorship.value,
+        gate="" if gate is None else gate.value,
+        reason="" if gate is None else decision.reason_for(gate),
+        quote="" if gate is None else _quote_for(decision, gate),
+    )
+
+
+def _internship_collection(
+    excluded: Sequence[ScreenDecision], *, wanted: frozenset[Level]
+) -> list[ScreenDecision]:
+    """The internships population: re-screened with the preference flipped.
+
+    Measured on the live corpus: 318 postings hit the internship gate and **48**
+    come out of here. The other 270 fail a gate that has nothing to do with being
+    an internship — 264 are not software roles ("Marketing Intern", "Finance
+    Co-op"), 12 are ATS vendor demo fixtures, the rest want a clearance or a
+    citizenship. Publishing all 318 under an "internships" heading would put a
+    vendor's invented roles and a marketing job on the page.
+
+    Derived as a second pass over the postings the internship gate removed, rather
+    than by running the whole funnel with ``include_internships=True``: the primary
+    pass is the one whose numbers are published, and flipping the flag there would
+    quietly restate "813 kept of 47,538" as "1,131 kept".
+
+    ``screen(..., include_internships=True)`` is the mechanism deliberately, not a
+    bespoke "is this an internship" check — that is what guarantees every *other*
+    gate still applies. A second mechanism would have to re-implement all of them.
+    """
+    kept: list[ScreenDecision] = []
+    for decision in excluded:
+        if Exclusion.INTERNSHIP not in decision.exclusions:
+            continue
+        allowed = screen(decision.posting, wanted=wanted, include_internships=True)
+        if allowed.kept:
+            kept.append(allowed)
+    return kept
+
+
+def build_screening_view(
+    postings: Sequence[Posting],
+    *,
+    now: datetime,
+    wanted: frozenset[Level] = JUNIOR_BANDS,
+) -> ScreeningView:
+    """Screen a corpus once and shape the result into publishable rows.
+
+    Pure: no I/O, no clock, no store. That is what lets the whole materialisation
+    be asserted against a list of postings instead of against a table.
+
+    ``screening.screen_all`` is deliberately not used. It sorts kept rows with a key
+    that mixes an aware epoch with whatever tzinfo a posting carries, so one naive
+    ``posted_at`` in the store raises ``TypeError`` mid-run — and here the ordering
+    is not needed at all, because the recency order lives in
+    :attr:`ScreenedRow.sort_key` and is applied by the store's range query. Sorting
+    47,538 decisions to then throw the order away would be the third place in this
+    codebase to re-derive it.
+
+    One row per (posting, view): kept postings under :data:`VIEW_KEPT`, software
+    internships under :data:`VIEW_INTERNSHIPS`, and excluded postings under **every**
+    gate they failed — which is why ``len(rows)`` exceeds ``len(postings)``.
+    """
+    report = ScreenReport()
+    kept: list[ScreenDecision] = []
+    excluded: list[ScreenDecision] = []
+    rows: list[ScreenedRow] = []
+    for posting in postings:
+        decision = screen(posting, wanted=wanted)
+        report.note(decision)
+        if decision.kept:
+            kept.append(decision)
+            rows.append(_row(decision, view=VIEW_KEPT, gate=None))
+            continue
+        excluded.append(decision)
+        rows.extend(
+            _row(decision, view=gate.value, gate=gate) for gate in decision.exclusions
+        )
+
+    internships = _internship_collection(excluded, wanted=wanted)
+    rows.extend(_row(d, view=VIEW_INTERNSHIPS, gate=None) for d in internships)
+
+    summary = ScreenSummary(
+        # Microseconds are in the generation on purpose: two runs inside one second
+        # would otherwise write into the same partitions, mixing two passes into one
+        # view — which is precisely the half-written state the generation exists to
+        # make impossible.
+        generation=now.astimezone(UTC).strftime("%Y%m%dT%H%M%S.%fZ"),
+        screened_at=now,
+        corpus_size=len(postings),
+        screened=report.total,
+        kept=report.kept,
+        excluded=report.excluded,
+        gates=dict(report.by_exclusion),
+        needs_level_check=report.needs_llm,
+        eligible_total=len(kept),
+        internship_total=len(internships),
+    )
+    return ScreeningView(
+        kept=tuple(kept),
+        internships=tuple(internships),
+        report=report,
+        rows=tuple(rows),
+        summary=summary,
+    )
+
+
 @dataclass(frozen=True)
 class SupplySummary:
     """What the supply half did, in counts. Shrinkage is visible or it is a bug.
@@ -147,6 +348,13 @@ class SupplySummary:
     a ``max_jobs`` cap must never read as "that was all there was". ``excluded`` is
     ``total - kept``, **not** the sum of the per-gate counts, which overcount by
     design because a role fails several gates at once.
+
+    ``fetched`` and ``screened`` are different numbers and both are reported.
+    ``fetched`` is what the boards returned this morning; ``screened`` is the open
+    corpus the view was built over, which is larger whenever closing was skipped and
+    smaller than the raw fetch because the fetch is deduped on the way in. A run
+    where they diverge wildly is a run worth looking at, and that is only visible if
+    both are present.
     """
 
     fetched: int = 0
@@ -159,6 +367,19 @@ class SupplySummary:
     failed_sources: tuple[str, ...] = ()
     #: Why closing was skipped: ``""``, ``"empty_fetch"`` or ``"degraded_fetch"``.
     close_skipped: str = ""
+    # --- the materialised screening view -------------------------------------
+    #: Open postings the screen covered. 0 with a non-empty corpus means the screen
+    #: did not run, which is why it is reported rather than inferred from ``kept``.
+    screened: int = 0
+    #: Size of the two published collections — what the worklist page will show.
+    eligible: int = 0
+    internships: int = 0
+    #: Rows written to the view. 1.79 per posting measured, because an excluded one is
+    #: filed under every gate it failed. 0 alongside a non-zero ``screened`` means
+    #: the screen ran and the publish did not.
+    view_rows: int = 0
+    #: ``""`` when the view was published, otherwise why it was not.
+    screen_skipped: str = ""
 
     @property
     def sources_failed(self) -> int:
@@ -218,7 +439,7 @@ class DailyBriefingService:
         max_emails: int = 50,
         draft_replies: bool = True,
     ) -> DailyRun:
-        """Inbox: fetch → triage → draft. Supply: fetch → screen → sync → close → score.
+        """Inbox: fetch → triage → draft. Supply: fetch → sync → close → screen → publish.
 
         The supply half runs even when the mailbox is unreachable. It is ordered
         *after* the inbox fetch only because the briefing needs both; nothing in it
@@ -267,6 +488,11 @@ class DailyBriefingService:
                 "kept": supply.kept,
                 "sources_failed": supply.sources_failed,
                 "close_skipped": supply.close_skipped,
+                "screened": supply.screened,
+                "eligible": supply.eligible,
+                "internships": supply.internships,
+                "view_rows": supply.view_rows,
+                "screen_skipped": supply.screen_skipped,
             }},
         )
         return run
@@ -276,11 +502,24 @@ class DailyBriefingService:
     def _refresh_supply(
         self, *, now: datetime
     ) -> tuple[list[ScreenDecision], list[str], SupplySummary]:
-        """Fetch → screen → sync → close. Returns ``(kept, new_ids, summary)``.
+        """Fetch → sync → close → screen the corpus → publish. Returns the kept set.
 
         The whole fetch is synced, not just the survivors: the store is the corpus
-        the worklist API screens on read, and its ``/excluded`` trust surface can
-        only quote a rejection reason for a posting it actually has.
+        the worklist API reads, and its ``/excluded`` trust surface can only quote a
+        rejection reason for a posting it actually has.
+
+        **The screen runs after the sync, over the stored corpus, not over the
+        fetch.** Three reasons, and all three were bugs waiting:
+
+        * The store *merges* descriptions — a Workday row that ships none keeps the
+          text Greenhouse gave it yesterday. Screening the fetch would judge the
+          Workday version and publish a verdict the read path could never reproduce
+          from what it actually serves.
+        * When closing is skipped (a degraded sweep) the open corpus is larger than
+          the fetch. The page shows open postings, so the view has to cover them.
+        * It is one screening pass instead of two. The old code screened the fetch
+          here and the read path screened the corpus again on every request; at
+          ~1.5 ms a posting, doing it twice in the cron would cost a needless ~70 s.
         """
         # Concurrency bounding and per-source isolation live in the source itself
         # (``WatchlistPostingSource``), so one dead board cannot sink the run and a
@@ -288,38 +527,64 @@ class DailyBriefingService:
         fetched = list(self.postings.fetch())
         health = read_source_health(self.postings)
 
-        kept, report = self._screen(fetched)
         new_ids, known_ids = self.posting_store.sync(fetched, now=now)
         closed, close_skipped = self._close_vanished(fetched, now=now, health=health)
+        view, screen_skipped = self._publish_screening(now=now)
 
-        return kept, new_ids, SupplySummary(
+        summary = view.summary
+        return list(view.kept), new_ids, SupplySummary(
             fetched=len(fetched),
             new=len(new_ids),
             known=len(known_ids),
             closed=closed,
-            kept=report.kept,
-            excluded=report.excluded,
+            kept=summary.kept,
+            excluded=summary.excluded,
             sources_ok=health.ok,
             failed_sources=health.failed[:MAX_REPORTED_FAILURES],
             close_skipped=close_skipped,
+            screened=summary.screened,
+            eligible=summary.eligible_total,
+            internships=summary.internship_total,
+            view_rows=len(view.rows) if not screen_skipped else 0,
+            screen_skipped=screen_skipped,
         )
 
-    def _screen(self, postings: Sequence[Posting]) -> tuple[list[ScreenDecision], ScreenReport]:
-        """Run the funnel, keeping the survivors and the counts.
+    def _publish_screening(self, *, now: datetime) -> tuple[ScreeningView, str]:
+        """Screen the stored corpus and publish it. Returns ``(view, skipped_reason)``.
 
-        ``screening.screen_all`` is deliberately not used: it sorts kept rows with a
-        key that mixes an aware epoch with whatever tzinfo a posting carries, and it
-        materialises the ~24k excluded decisions this path never reads. Same
-        reasoning as ``worklist_api.build_index``.
+        Contained rather than raising, and the containment is the same argument the
+        inbox half makes: by this point the corpus is already synced, so a failure
+        here must not cost a day of history, and an EventBridge retry would refetch
+        several hundred boards to re-attempt a CPU-bound pass.
+
+        There is deliberately **no fallback to screening the fetch** for the digest.
+        A fallback would produce counts from a pass that was never published, so the
+        numbers in the morning email would disagree with the numbers on the page —
+        which is the exact class of "two sources of truth for one funnel" bug this
+        view exists to remove. A run that could not screen reports ``kept: 0`` with
+        ``screen_skipped`` naming the reason, and the previously published view stays
+        current until tomorrow.
         """
-        report = ScreenReport()
-        kept: list[ScreenDecision] = []
-        for posting in postings:
-            decision = screen(posting, wanted=self.wanted_levels)
-            report.note(decision)
-            if decision.kept:
-                kept.append(decision)
-        return kept, report
+        try:
+            corpus = self.posting_store.open_postings()
+            view = build_screening_view(corpus, now=now, wanted=self.wanted_levels)
+            # Rows first, summary last — the store's contract, not this caller's
+            # choice. Its presence is what makes the new view readable at all.
+            self.posting_store.save_screening(view.rows, summary=view.summary)
+        except Exception as exc:
+            self.log.warning("screening_view_publish_failed", exc_info=True)
+            return build_screening_view([], now=now), _error_label(exc)
+        self.log.info(
+            "screening_view_published",
+            extra={"extra_fields": {
+                "screened": view.summary.screened,
+                "eligible": view.summary.eligible_total,
+                "internships": view.summary.internship_total,
+                "rows": len(view.rows),
+                "generation": view.summary.generation,
+            }},
+        )
+        return view, ""
 
     def _close_vanished(
         self, fetched: Sequence[Posting], *, now: datetime, health: SourceHealth

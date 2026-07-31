@@ -15,12 +15,19 @@ Three columns carry the product logic:
 ``interpretation`` is the LLM cache, keyed by posting id (a hash of the URL). A
 posting sits in a feed for weeks; reading its description once instead of once
 per day is a larger cost saving than any model choice.
+
+Two further tables hold the **materialised screening view** (see
+:mod:`copilot.ports.postingstore`): ``screen_rows`` is one row per
+(posting, view) pair and ``screen_summary`` is the single published funnel. The
+generation column is what makes publishing atomic — rows land under a new
+generation that nothing reads until the summary names it — and it is why a screen
+that dies half-way cannot leave a half-written view that reads as authoritative.
 """
 from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +35,15 @@ from typing import Any
 
 from copilot.domain.posting import Posting
 from copilot.logging import get_logger
+from copilot.ports.postingstore import (
+    SCREEN_VIEWS,
+    ScreenedPage,
+    ScreenedRow,
+    ScreenSummary,
+    posted_at_from_sort_key,
+    summary_from_json,
+    summary_to_json,
+)
 
 _LOG = get_logger("copilot.adapters.sqlite_posting_store")
 
@@ -56,6 +72,36 @@ CREATE TABLE IF NOT EXISTS postings (
 CREATE INDEX IF NOT EXISTS idx_postings_first_seen ON postings(first_seen);
 CREATE INDEX IF NOT EXISTS idx_postings_open ON postings(closed_at) WHERE closed_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_postings_company ON postings(company);
+
+-- The materialised screening view. One row per (posting, view): a posting that
+-- fails three gates is filed under all three, because /excluded pages per gate.
+CREATE TABLE IF NOT EXISTS screen_rows (
+    generation          TEXT NOT NULL,
+    view                TEXT NOT NULL,
+    sort_key            TEXT NOT NULL,
+    posting_id          TEXT NOT NULL,
+    kept                INTEGER NOT NULL,
+    level               TEXT NOT NULL,
+    level_source        TEXT NOT NULL,
+    level_why           TEXT NOT NULL DEFAULT '',
+    eligibility_checked INTEGER NOT NULL,
+    sponsorship         TEXT NOT NULL,
+    gate                TEXT NOT NULL DEFAULT '',
+    reason              TEXT NOT NULL DEFAULT '',
+    quote               TEXT NOT NULL DEFAULT '',
+    -- (generation, view, sort_key) rather than a rowid: this *is* the index the
+    -- read path pages on, so the primary key does the work and no second B-tree
+    -- is written 45k times a day for nothing.
+    PRIMARY KEY (generation, view, sort_key)
+) WITHOUT ROWID;
+
+-- Exactly one published view. The CHECK is the schema saying so: a second summary
+-- row would make "which generation is current" a query with two answers.
+CREATE TABLE IF NOT EXISTS screen_summary (
+    id          TEXT PRIMARY KEY CHECK (id = 'CURRENT'),
+    generation  TEXT NOT NULL,
+    payload     TEXT NOT NULL
+);
 """
 
 _COLUMNS = (
@@ -192,6 +238,132 @@ class SqlitePostingStore:
                 (_iso(now), posting_id),
             )
 
+    # --- the materialised screening view -------------------------------------
+
+    def save_screening(self, rows: Iterable[ScreenedRow], *, summary: ScreenSummary) -> None:
+        """Write every row under the new generation, then publish the summary.
+
+        Two transactions on purpose, in this order:
+
+        1. the rows, which no reader can find yet because nothing names their
+           generation;
+        2. the summary, which is the publish.
+
+        A crash between them leaves orphan rows and the *previous* view still
+        current — aging but complete — which is the only failure shape a reader can
+        answer honestly. Doing it in one transaction would be tidier here and
+        impossible on DynamoDB, and a port whose two implementations have different
+        crash semantics is a port that proves nothing.
+
+        Old generations are deleted **after** publishing, for the same reason:
+        deleting first would empty the live view for the duration of the write.
+        SQLite can afford that sweep — 45,158 rows land in 0.48 s on the real
+        corpus — while the DynamoDB adapter uses a TTL instead, because there deletes
+        cost as much as writes and ~85k of them a day is real money for rows nothing
+        can read.
+        """
+        payload = [
+            (
+                summary.generation,
+                row.view,
+                row.sort_key,
+                row.posting_id,
+                int(row.kept),
+                row.level,
+                row.level_source,
+                row.level_why,
+                int(row.eligibility_checked),
+                row.sponsorship,
+                row.gate,
+                row.reason,
+                row.quote,
+            )
+            for row in rows
+        ]
+        with self._tx() as conn:
+            conn.executemany(
+                """
+                INSERT INTO screen_rows (
+                    generation, view, sort_key, posting_id, kept, level,
+                    level_source, level_why, eligibility_checked, sponsorship,
+                    gate, reason, quote
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(generation, view, sort_key) DO NOTHING
+                """,
+                payload,
+            )
+        with self._tx() as conn:
+            conn.execute(
+                """
+                INSERT INTO screen_summary (id, generation, payload) VALUES ('CURRENT', ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    generation = excluded.generation, payload = excluded.payload
+                """,
+                (summary.generation, summary_to_json(summary)),
+            )
+        with self._tx() as conn:
+            conn.execute("DELETE FROM screen_rows WHERE generation <> ?", (summary.generation,))
+        _LOG.info(
+            "screening_view_published",
+            extra={"extra_fields": {
+                "generation": summary.generation,
+                "rows": len(payload),
+                "kept": summary.kept,
+                "screened": summary.screened,
+            }},
+        )
+
+    def screening_summary(self) -> ScreenSummary | None:
+        row = self._conn.execute(
+            "SELECT payload FROM screen_summary WHERE id = 'CURRENT'"
+        ).fetchone()
+        if row is None:
+            return None
+        return summary_from_json(str(row["payload"]))
+
+    def screened_page(
+        self, view: str, *, generation: str, limit: int, after: str | None = None
+    ) -> ScreenedPage:
+        """One recency page of one view, served by the primary key alone.
+
+        ``limit + 1`` rows are read so "is there a next page" is answered without a
+        COUNT: a ``hasMore`` derived from a separate count can disagree with the
+        page it describes when the view is republished between the two queries.
+        """
+        if view not in SCREEN_VIEWS:
+            raise ValueError(f"unknown screening view {view!r}")
+        sql = "SELECT * FROM screen_rows WHERE generation = ? AND view = ?"
+        params: list[object] = [generation, view]
+        if after is not None:
+            sql += " AND sort_key < ?"
+            params.append(after)
+        sql += " ORDER BY sort_key DESC LIMIT ?"
+        params.append(limit + 1)
+        found = self._conn.execute(sql, params).fetchall()
+        rows = tuple(self._to_screened_row(row) for row in found[:limit])
+        next_token = rows[-1].sort_key if len(found) > limit and rows else None
+        return ScreenedPage(rows=rows, next_token=next_token)
+
+    @staticmethod
+    def _to_screened_row(row: sqlite3.Row) -> ScreenedRow:
+        return ScreenedRow(
+            posting_id=row["posting_id"],
+            view=row["view"],
+            # Out of the sort key, not a column of its own: the key holds it
+            # UTC-normalised, and a column would keep whatever offset the ATS sent —
+            # so the two stores would answer with two different strings.
+            posted_at=posted_at_from_sort_key(str(row["sort_key"])),
+            kept=bool(row["kept"]),
+            level=row["level"],
+            level_source=row["level_source"],
+            level_why=row["level_why"],
+            eligibility_checked=bool(row["eligibility_checked"]),
+            sponsorship=row["sponsorship"],
+            gate=row["gate"],
+            reason=row["reason"],
+            quote=row["quote"],
+        )
+
     # --- reads ---------------------------------------------------------------
 
     def _existing_ids(self, ids: Sequence[str]) -> set[str]:
@@ -240,6 +412,28 @@ class SqlitePostingStore:
             "SELECT * FROM postings WHERE closed_at IS NULL ORDER BY posted_at DESC"
         ).fetchall()
         return [self._to_posting(row) for row in rows]
+
+    def postings_by_id(self, posting_ids: Sequence[str]) -> dict[str, Posting]:
+        """Hydrate one page. Closed postings are included on purpose.
+
+        ``/excluded`` and ``POST /applied`` both address postings the worklist no
+        longer lists, and a hydrate that quietly filtered on ``closed_at`` would
+        turn "this role closed" into "no such posting" — a 404 that reads as a bug
+        in the page rather than as news about the job.
+        """
+        if not posting_ids:
+            return {}
+        found: dict[str, Posting] = {}
+        with closing(self._conn.cursor()) as cursor:
+            for start in range(0, len(posting_ids), 500):  # SQLite's variable cap
+                chunk = posting_ids[start : start + 500]
+                placeholders = ",".join("?" * len(chunk))
+                cursor.execute(
+                    f"SELECT * FROM postings WHERE id IN ({placeholders})", chunk
+                )
+                for row in cursor.fetchall():
+                    found[row["id"]] = self._to_posting(row)
+        return found
 
     def cached_interpretation(self, posting_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(

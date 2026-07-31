@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 import sys
 import types
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
@@ -44,6 +44,18 @@ from copilot.adapters.dynamodb_posting_store import (
 )
 from copilot.adapters.sqlite_posting_store import SqlitePostingStore
 from copilot.domain.posting import Posting
+from copilot.domain.screening import Exclusion
+from copilot.ports.postingstore import (
+    QUOTE_MAX_CHARS,
+    UNDATED_SORT_STAMP,
+    VIEW_INTERNSHIPS,
+    VIEW_KEPT,
+    ScreenedRow,
+    ScreenSummary,
+    cap_quote,
+    summary_from_payload,
+    summary_to_payload,
+)
 
 DAY1 = datetime(2026, 7, 1, 9, 0, tzinfo=UTC)
 DAY2 = DAY1 + timedelta(days=1)
@@ -233,6 +245,10 @@ class FakeTable:
     updates: int = 0
     queries: int = 0
     gets: int = 0
+    #: Every item key in the order it was written. The screening view's whole
+    #: crash-safety argument is "the summary is written last", and nothing else
+    #: here can observe write *order*.
+    write_log: list[tuple[str, str]] = field(default_factory=list)
     _written: int = 0
 
     # --- writes ---
@@ -264,6 +280,7 @@ class FakeTable:
         ):
             raise ConditionalCheckFailedException("The conditional request failed")
         self.items[key] = deepcopy(Item)
+        self.write_log.append(key)
 
     def update_item(
         self,
@@ -329,12 +346,17 @@ class FakeTable:
         if not kwargs.get("ScanIndexForward", True):
             rows.reverse()
         start = int(kwargs.get("ExclusiveStartKey", {}).get("_offset", 0))
-        page = rows[start : start + self.page_size]
+        # ``Limit`` caps a page; ``page_size`` stands in for the 1 MB cut, which
+        # DynamoDB applies *first*. So the smaller of the two wins, and a caller
+        # asking for 26 rows from a table paging at 3 really does get 3 — which is
+        # exactly the under-fill an implementation using ``Limit`` alone would hide.
+        size = min(self.page_size, int(kwargs["Limit"])) if "Limit" in kwargs else self.page_size
+        page = rows[start : start + size]
         response: dict[str, Any] = {"Count": len(page)}
         if kwargs.get("Select") != "COUNT":
             response["Items"] = [_project(item, index) for item in page]
-        if start + self.page_size < len(rows):
-            response["LastEvaluatedKey"] = {"_offset": start + self.page_size}
+        if start + size < len(rows):
+            response["LastEvaluatedKey"] = {"_offset": start + size}
         return response
 
     def _matching(
@@ -428,6 +450,93 @@ def post(n: int, *, desc: str = "a description", company: str = "Acme") -> Posti
 def dynamo(*, page_size: int = 100) -> tuple[DynamoDbPostingStore, FakeTable]:
     table = FakeTable(page_size=page_size)
     return DynamoDbPostingStore("career-copilot-postings", table=table), table
+
+
+def kept_row(n: int, *, posted_at: datetime | None = DAY1) -> ScreenedRow:
+    return ScreenedRow(
+        posting_id=post(n).id,
+        view=VIEW_KEPT,
+        posted_at=posted_at,
+        kept=True,
+        level="entry",
+        level_source="title",
+        level_why="the title carries an entry marker",
+        eligibility_checked=True,
+        sponsorship="unstated",
+    )
+
+
+def gate_row(
+    n: int,
+    gate: Exclusion,
+    *,
+    posted_at: datetime | None = DAY1,
+    quote: str = "US citizens only",
+) -> ScreenedRow:
+    return ScreenedRow(
+        posting_id=post(n).id,
+        view=gate.value,
+        posted_at=posted_at,
+        kept=False,
+        level="senior",
+        level_source="title",
+        level_why="the title carries a senior marker",
+        eligibility_checked=True,
+        sponsorship="unstated",
+        gate=gate.value,
+        reason=f"failed {gate.value}",
+        quote=quote,
+    )
+
+
+def intern_row(n: int, *, posted_at: datetime | None = DAY1) -> ScreenedRow:
+    return ScreenedRow(
+        posting_id=post(n).id,
+        view=VIEW_INTERNSHIPS,
+        posted_at=posted_at,
+        kept=True,
+        level="intern",
+        level_source="title",
+        level_why="the title carries an intern marker",
+        eligibility_checked=True,
+        sponsorship="unstated",
+    )
+
+
+def view_summary(
+    rows: Sequence[ScreenedRow],
+    *,
+    generation: str = "gen-1",
+    screened_at: datetime = DAY2,
+) -> ScreenSummary:
+    """A summary derived from the rows, so a test cannot state numbers that disagree."""
+    kept = [row for row in rows if row.view == VIEW_KEPT]
+    interns = [row for row in rows if row.view == VIEW_INTERNSHIPS]
+    gates: dict[str, int] = {}
+    for row in rows:
+        if row.gate:
+            gates[row.gate] = gates.get(row.gate, 0) + 1
+    postings = {row.posting_id for row in rows}
+    return ScreenSummary(
+        generation=generation,
+        screened_at=screened_at,
+        corpus_size=len(postings),
+        screened=len(postings),
+        kept=len(kept),
+        excluded=len(postings) - len(kept),
+        gates=gates,
+        needs_level_check=0,
+        eligible_total=len(kept),
+        internship_total=len(interns),
+    )
+
+
+def dies_after(rows: Sequence[ScreenedRow], n: int) -> Iterator[ScreenedRow]:
+    """A row producer that fails part-way, the way a Lambda timeout does."""
+    for index, row in enumerate(rows):
+        if index >= n:
+            raise RuntimeError("screen died mid-write")
+        yield row
 
 
 @pytest.fixture(params=["dynamodb", "sqlite"])
@@ -708,6 +817,365 @@ class TestRoundTrip:
 
 
 # --------------------------------------------------------------------------- #
+# The materialised screening view — both stores, one set of assertions
+#
+# The bug every case below prevents is the same one: the read API screened the
+# whole corpus per request (1.7 s to read 25,294 rows, 37.8 s to screen them;
+# ~70 s at the deployed 47,538) against a 29 s API Gateway ceiling, so every
+# request 504'd including ``?limit=1``. These prove the view that replaces it is
+# O(page), that it is never half-published, and that both adapters agree.
+# --------------------------------------------------------------------------- #
+
+
+class TestScreeningViewLifecycle:
+    def test_an_unscreened_corpus_says_so_instead_of_pretending(self, store: Any) -> None:
+        """The "not ready" answer. Without it a reader has to screen live to find
+        out there is nothing to read, which is the 504."""
+        store.sync([post(1)], now=DAY1)
+        assert store.screening_summary() is None
+        assert store.screened_page(VIEW_KEPT, generation="gen-1", limit=25).rows == ()
+
+    def test_publishing_makes_the_funnel_and_the_page_readable(self, store: Any) -> None:
+        rows = [kept_row(1), kept_row(2), gate_row(3, Exclusion.LEVEL)]
+        summary = view_summary(rows)
+        store.save_screening(rows, summary=summary)
+
+        stored = store.screening_summary()
+        assert stored == summary
+        page = store.screened_page(VIEW_KEPT, generation=summary.generation, limit=25)
+        assert {row.posting_id for row in page.rows} == {post(1).id, post(2).id}
+        assert page.next_token is None
+
+    def test_the_summary_survives_the_round_trip_field_for_field(self, store: Any) -> None:
+        """A count that decodes wrongly is worse than one that is missing: it is
+        published on the page as fact."""
+        rows = [kept_row(1), gate_row(2, Exclusion.NOT_SWE), gate_row(2, Exclusion.LEVEL)]
+        summary = view_summary(rows, generation="gen-round-trip", screened_at=DAY3)
+        store.save_screening(rows, summary=summary)
+
+        stored = store.screening_summary()
+        assert stored is not None
+        assert stored.generation == "gen-round-trip"
+        assert stored.screened_at == DAY3
+        assert stored.gates == {"not_a_software_role": 1, "wrong_seniority_band": 1}
+        assert stored.gate_count_total == 2
+        assert stored.excluded == 1, "one posting removed, two gate fires"
+
+    def test_a_screen_that_dies_mid_write_leaves_the_previous_view_current(
+        self, store: Any
+    ) -> None:
+        """The exact production shape: the first live cron crashed after the corpus
+        landed and before the run finished. A half-written view that reads as
+        authoritative would publish a page with nothing on it and no way to tell
+        that apart from a genuinely empty market."""
+        good = [kept_row(n) for n in range(4)]
+        first = view_summary(good, generation="gen-good")
+        store.save_screening(good, summary=first)
+
+        doomed = [kept_row(n) for n in range(20, 40)]
+        with pytest.raises(RuntimeError, match="died mid-write"):
+            store.save_screening(
+                dies_after(doomed, 5), summary=view_summary(doomed, generation="gen-doomed")
+            )
+
+        assert store.screening_summary() == first
+        page = store.screened_page(VIEW_KEPT, generation="gen-good", limit=25)
+        assert len(page.rows) == 4
+
+    def test_rows_under_an_unpublished_generation_are_unreachable(self, store: Any) -> None:
+        """The generation is the publish mechanism, not a label. Nothing can read a
+        pass the summary does not name — which is why writing the summary last is
+        the whole crash-safety argument."""
+        rows = [kept_row(1)]
+        store.save_screening(rows, summary=view_summary(rows, generation="gen-1"))
+        assert store.screened_page(VIEW_KEPT, generation="gen-2", limit=25).rows == ()
+
+    def test_republishing_serves_the_new_pass_and_not_the_old_one(self, store: Any) -> None:
+        yesterday = [kept_row(1), kept_row(2)]
+        store.save_screening(yesterday, summary=view_summary(yesterday, generation="gen-1"))
+        today = [kept_row(3)]
+        latest = view_summary(today, generation="gen-2", screened_at=DAY3)
+        store.save_screening(today, summary=latest)
+
+        assert store.screening_summary() == latest
+        page = store.screened_page(VIEW_KEPT, generation="gen-2", limit=25)
+        assert [row.posting_id for row in page.rows] == [post(3).id]
+
+    def test_an_unknown_view_is_refused_rather_than_answered_emptily(self, store: Any) -> None:
+        """A typo'd view name returning no rows is indistinguishable from a screen
+        that produced nothing, and telling those apart is why this view exists."""
+        with pytest.raises(ValueError, match="unknown screening view"):
+            store.screened_page("kepts", generation="gen-1", limit=25)
+
+
+class TestScreeningViewOrderingAndPaging:
+    def test_a_page_is_newest_posted_first_with_undated_last(self, store: Any) -> None:
+        """The worklist's only ordering is recency, and an undated posting must sort
+        last rather than vanish or lead."""
+        rows = [
+            kept_row(1, posted_at=DAY1),
+            kept_row(2, posted_at=DAY3),
+            kept_row(3, posted_at=None),
+            kept_row(4, posted_at=DAY2),
+        ]
+        store.save_screening(rows, summary=view_summary(rows))
+        page = store.screened_page(VIEW_KEPT, generation="gen-1", limit=25)
+        assert [row.posted_at for row in page.rows] == [DAY3, DAY2, DAY1, None]
+
+    def test_keyset_paging_walks_every_row_exactly_once(self, store: Any) -> None:
+        """40 rows in pages of 7 — the boundary case that catches an off-by-one in
+        the cursor, which shows up as a skipped or duplicated posting."""
+        rows = [kept_row(n, posted_at=DAY1 + timedelta(minutes=n)) for n in range(40)]
+        store.save_screening(rows, summary=view_summary(rows))
+
+        seen: list[str] = []
+        token: str | None = None
+        for _ in range(20):  # generous bound; a runaway loop is a failure too
+            page = store.screened_page(VIEW_KEPT, generation="gen-1", limit=7, after=token)
+            seen.extend(row.posting_id for row in page.rows)
+            token = page.next_token
+            if token is None:
+                break
+        assert token is None, "paging never terminated"
+        assert len(seen) == 40
+        assert len(set(seen)) == 40, "a posting was served on two pages"
+        assert seen == [row.posting_id for row in reversed(rows)]
+
+    def test_the_last_full_page_reports_no_next_token(self, store: Any) -> None:
+        """``hasMore`` is derived from the token, so a token handed out on an exact
+        multiple would render a 'next page' button onto an empty page."""
+        rows = [kept_row(n, posted_at=DAY1 + timedelta(minutes=n)) for n in range(10)]
+        store.save_screening(rows, summary=view_summary(rows))
+        first = store.screened_page(VIEW_KEPT, generation="gen-1", limit=5)
+        assert first.next_token is not None
+        second = store.screened_page(
+            VIEW_KEPT, generation="gen-1", limit=5, after=first.next_token
+        )
+        assert len(second.rows) == 5
+        assert second.next_token is None
+
+    def test_postings_sharing_a_posted_at_still_page_without_repeats(self, store: Any) -> None:
+        """~4,700 postings in this corpus share a ``posted_at`` to the second. A sort
+        key without the id would make every page boundary between them lossy."""
+        rows = [kept_row(n, posted_at=DAY1) for n in range(9)]
+        store.save_screening(rows, summary=view_summary(rows))
+        first = store.screened_page(VIEW_KEPT, generation="gen-1", limit=4)
+        second = store.screened_page(
+            VIEW_KEPT, generation="gen-1", limit=4, after=first.next_token
+        )
+        third = store.screened_page(
+            VIEW_KEPT, generation="gen-1", limit=4, after=second.next_token
+        )
+        served = [r.posting_id for r in (*first.rows, *second.rows, *third.rows)]
+        assert len(set(served)) == 9
+
+
+class TestScreeningViewMembership:
+    def test_a_posting_is_filed_under_every_gate_it_failed(self, store: Any) -> None:
+        """A posting is routinely senior *and* clearance-restricted, and /excluded
+        groups by gate. One row per posting could not serve both groups."""
+        rows = [
+            gate_row(1, Exclusion.LEVEL),
+            gate_row(1, Exclusion.CLEARANCE, quote="active TS/SCI clearance"),
+            gate_row(2, Exclusion.LEVEL),
+        ]
+        store.save_screening(rows, summary=view_summary(rows))
+        level = store.screened_page("wrong_seniority_band", generation="gen-1", limit=25)
+        clearance = store.screened_page(
+            "security_clearance_required", generation="gen-1", limit=25
+        )
+        assert {row.posting_id for row in level.rows} == {post(1).id, post(2).id}
+        assert [row.posting_id for row in clearance.rows] == [post(1).id]
+        assert clearance.rows[0].quote == "active TS/SCI clearance"
+
+    def test_each_gate_row_carries_its_own_evidence(self, store: Any) -> None:
+        """A grouped view must quote the phrase that tripped *that* gate, not
+        whichever exclusion happened to fire first."""
+        rows = [
+            gate_row(1, Exclusion.CITIZENSHIP, quote="must be a US citizen"),
+            gate_row(1, Exclusion.NO_SPONSORSHIP, quote="we do not sponsor visas"),
+        ]
+        store.save_screening(rows, summary=view_summary(rows))
+        quotes = {
+            gate: store.screened_page(gate, generation="gen-1", limit=5).rows[0].quote
+            for gate in ("citizenship_or_itar_restricted", "employer_will_not_sponsor")
+        }
+        assert quotes == {
+            "citizenship_or_itar_restricted": "must be a US citizen",
+            "employer_will_not_sponsor": "we do not sponsor visas",
+        }
+
+    def test_the_internships_collection_is_its_own_population(self, store: Any) -> None:
+        """318 postings hit the internship gate and 48 are software internships.
+        Both numbers are stored, so the difference is legible rather than an
+        off-by-270 bug."""
+        rows = [
+            gate_row(1, Exclusion.INTERNSHIP, quote="Intern"),
+            gate_row(2, Exclusion.INTERNSHIP, quote="Marketing Intern"),
+            gate_row(2, Exclusion.NOT_SWE, quote="Marketing Intern"),
+            intern_row(1),
+        ]
+        summary = view_summary(rows)
+        store.save_screening(rows, summary=summary)
+
+        gated = store.screened_page("internship_not_full_time", generation="gen-1", limit=25)
+        collection = store.screened_page(VIEW_INTERNSHIPS, generation="gen-1", limit=25)
+        assert len(gated.rows) == 2
+        assert [row.posting_id for row in collection.rows] == [post(1).id]
+        # The reconciliation, asserted on the stored funnel and not just the pages.
+        assert summary.gates["internship_not_full_time"] == 2
+        assert summary.internship_total == 1
+
+    def test_the_kept_view_holds_only_kept_postings(self, store: Any) -> None:
+        rows = [kept_row(1), gate_row(2, Exclusion.LEVEL)]
+        store.save_screening(rows, summary=view_summary(rows))
+        page = store.screened_page(VIEW_KEPT, generation="gen-1", limit=25)
+        assert all(row.kept for row in page.rows)
+        assert all(row.gate == "" for row in page.rows)
+
+    def test_a_posting_listed_twice_lands_in_the_view_once(self, store: Any) -> None:
+        """A company re-listing a requisition gives two postings one id, and so one
+        row key. SQLite would raise an IntegrityError and DynamoDB a
+        ValidationException on the duplicate key — either way the whole publish fails
+        and the site serves yesterday's view for a routine data shape.
+        """
+        rows = [kept_row(1), kept_row(1), kept_row(2)]
+        store.save_screening(rows, summary=view_summary(rows))
+        page = store.screened_page(VIEW_KEPT, generation="gen-1", limit=25)
+        assert len(page.rows) == 2
+
+    def test_a_non_utc_posted_at_comes_back_identically_from_both_stores(
+        self, store: Any
+    ) -> None:
+        """``posted_at`` is derived from the sort key, not stored beside it.
+
+        SQLite used to keep it in its own column, which preserved whatever offset the
+        ATS sent, while DynamoDB read it out of the (UTC-normalised) sort key. The two
+        answers compare **equal as instants**, which is exactly why the divergence
+        would survive an equality assertion and then surface as ``09:00+05:00`` on the
+        laptop and ``04:00+00:00`` in Lambda for the same posting.
+        """
+        tehran = datetime(2026, 7, 1, 9, 0, tzinfo=timezone(timedelta(hours=5)))
+        row = kept_row(1, posted_at=tehran)
+        store.save_screening([row], summary=view_summary([row]))
+        [stored] = store.screened_page(VIEW_KEPT, generation="gen-1", limit=5).rows
+        assert stored.posted_at == tehran
+        assert stored.posted_at is not None
+        assert stored.posted_at.utcoffset() == timedelta(0), "normalised, not as sent"
+        assert stored.sort_key == row.sort_key
+
+    def test_a_row_round_trips_every_field_it_declares(self, store: Any) -> None:
+        """A dropped field is invisible until a card renders "unknown" for a level
+        the screen decided, or an exclusion loses its quote."""
+        row = ScreenedRow(
+            posting_id=post(7).id,
+            view="wrong_seniority_band",
+            posted_at=DAY2,
+            kept=False,
+            level="mid",
+            level_source="years",
+            level_why="the description asks for 4+ years",
+            eligibility_checked=False,
+            sponsorship="will_not_sponsor",
+            gate="wrong_seniority_band",
+            reason="seniority band is mid, not entry-level",
+            quote="4+ years of experience",
+        )
+        store.save_screening([row], summary=view_summary([row]))
+        [stored] = store.screened_page(
+            "wrong_seniority_band", generation="gen-1", limit=5
+        ).rows
+        assert stored == row
+
+
+class TestHydratingAPage:
+    def test_a_page_of_ids_becomes_postings(self, store: Any) -> None:
+        store.sync([post(1), post(2), post(3)], now=DAY1)
+        found = store.postings_by_id([post(2).id, post(1).id])
+        assert set(found) == {post(1).id, post(2).id}
+        assert found[post(2).id] == post(2)
+
+    def test_an_unknown_id_is_absent_rather_than_fatal(self, store: Any) -> None:
+        """The corpus moves under a reader: a posting can be reaped between the view
+        being written and a page being served, and that must cost one row."""
+        store.sync([post(1)], now=DAY1)
+        found = store.postings_by_id([post(1).id, "deadbeefdeadbeef"])
+        assert list(found) == [post(1).id]
+
+    def test_a_closed_posting_still_hydrates(self, store: Any) -> None:
+        """/excluded and POST /applied both address postings the worklist no longer
+        lists. Filtering them here turns "this role closed" into "no such posting"."""
+        store.sync([post(1), post(2)], now=DAY1)
+        store.close_missing(now=DAY2, seen_ids={post(1).id})
+        assert set(store.postings_by_id([post(1).id, post(2).id])) == {
+            post(1).id,
+            post(2).id,
+        }
+
+    def test_hydrating_nothing_reads_nothing(self, store: Any) -> None:
+        assert store.postings_by_id([]) == {}
+
+
+class TestSummaryEncoding:
+    """Pure encoding rules — no store, because both stores share this code."""
+
+    def test_a_summary_from_an_older_view_version_reads_as_absent(self) -> None:
+        """A shape change must cost one stale day, not a page of plausible nonsense
+        decoded out of fields that no longer mean what they did."""
+        payload = summary_to_payload(view_summary([kept_row(1)]))
+        payload["view_version"] = 0
+        assert summary_from_payload(payload) is None
+
+    def test_a_summary_missing_a_field_reads_as_absent(self) -> None:
+        payload = summary_to_payload(view_summary([kept_row(1)]))
+        del payload["kept"]
+        assert summary_from_payload(payload) is None
+
+    def test_a_healthy_summary_round_trips(self) -> None:
+        summary = view_summary([kept_row(1), gate_row(2, Exclusion.LEVEL)])
+        assert summary_from_payload(summary_to_payload(summary)) == summary
+
+    def test_staleness_is_a_property_of_the_summary_not_of_the_reader(self) -> None:
+        """A reader must be able to answer "is this current" without touching the
+        corpus — counting the corpus per request is the cost this view removes."""
+        summary = view_summary([kept_row(1)], screened_at=DAY1)
+        assert summary.is_stale(DAY1 + timedelta(hours=12)) is False
+        assert summary.is_stale(DAY1 + timedelta(hours=47)) is False
+        assert summary.is_stale(DAY1 + timedelta(hours=49)) is True
+
+    def test_a_view_stamped_in_the_future_is_stale(self) -> None:
+        """Writer and reader clocks disagreeing must not publish a ``screenedAt``
+        a reader cannot reconcile with anything."""
+        summary = view_summary([kept_row(1)], screened_at=DAY3)
+        assert summary.is_stale(DAY1) is True
+
+    def test_the_overcount_flag_is_always_on_the_wire(self) -> None:
+        """A UI that renders the funnel as a subtraction chain of gate counts lies:
+        43,602 gate fires against 24,414 postings removed on a real run."""
+        summary = view_summary(
+            [gate_row(1, Exclusion.LEVEL), gate_row(1, Exclusion.CLEARANCE)]
+        )
+        assert summary.gate_counts_overcount is True
+        assert summary.gate_count_total == 2
+        assert summary.excluded == 1
+
+    def test_an_evidence_quote_is_capped_and_whitespace_normalised(self) -> None:
+        """The cap belongs where the row is written, not only where it is
+        serialised: the public route publishes no description prose, and an
+        uncapped quote is copied once per view the posting sits in."""
+        assert cap_quote("  US citizens\n  only  ") == "US citizens only"
+        long = cap_quote("x" * 500)
+        assert len(long) == QUOTE_MAX_CHARS
+        assert long.endswith("…")
+
+    def test_the_undated_sentinel_sorts_below_every_real_stamp(self) -> None:
+        """Sort keys compare as bytes, so the sentinel has to be lexicographically
+        under 1970 as well as under 2026."""
+        assert datetime(1970, 1, 1, tzinfo=UTC).isoformat() > UNDATED_SORT_STAMP
+        assert DAY1.isoformat() > UNDATED_SORT_STAMP
+
+
+# --------------------------------------------------------------------------- #
 # DynamoDB-only failure modes
 # --------------------------------------------------------------------------- #
 
@@ -892,6 +1360,173 @@ class TestRaces:
         [stored] = store.open_postings()
         assert stored == post(1)
         assert table.puts == 1
+
+
+class TestScreeningViewOnDynamo:
+    """The parts of the view that only DynamoDB can get wrong."""
+
+    def test_the_summary_is_the_last_write_of_the_publish(self) -> None:
+        """The whole crash-safety argument is an ordering claim, and this is the only
+        assertion that can observe ordering. If the summary went first, a run that
+        died half-way would publish a generation whose rows were not all there."""
+        store, table = dynamo()
+        rows = [kept_row(n) for n in range(30)]
+        store.save_screening(rows, summary=view_summary(rows))
+        assert table.write_log[-1] == ("SCREEN#SUMMARY", "CURRENT")
+        assert ("SCREEN#SUMMARY", "CURRENT") not in table.write_log[:-1]
+
+    def test_rows_are_written_25_at_a_time(self) -> None:
+        """84k single PutItems is the difference between seconds and an hour."""
+        store, table = dynamo()
+        rows = [kept_row(n) for n in range(60)]
+        store.save_screening(rows, summary=view_summary(rows))
+        assert table.batch_flushes == [25, 25, 10]
+
+    def test_rows_spread_across_shards_instead_of_one_hot_partition(self) -> None:
+        """``not_a_software_role`` holds ~45,000 of 47,538 postings. A single
+        partition key takes at most 1,000 WCU/s no matter the table's capacity —
+        DynamoDB splits a hot partition by key range, never a single key — so one
+        unsharded view would spend ~45 s of the cron's 900 s budget on its own."""
+        store, table = dynamo()
+        rows = [gate_row(n, Exclusion.NOT_SWE) for n in range(200)]
+        store.save_screening(rows, summary=view_summary(rows))
+        partitions = {
+            str(key[0]) for key in table.items if str(key[0]).startswith("SCREENVIEW#")
+        }
+        assert len(partitions) > 8
+
+    def test_a_page_read_is_bounded_by_the_page_not_by_the_view(self) -> None:
+        """The measurement that this change exists for. A page of 25 out of 500 rows
+        must cost a fixed 16 shard queries — one per shard — not a walk of the view.
+        An implementation that paged to exhaustion would pass every other test here
+        and 504 in production."""
+        store, table = dynamo()
+        rows = [kept_row(n, posted_at=DAY1 + timedelta(minutes=n)) for n in range(500)]
+        store.save_screening(rows, summary=view_summary(rows))
+        table.queries = 0
+        page = store.screened_page(VIEW_KEPT, generation="gen-1", limit=25)
+        assert len(page.rows) == 25
+        assert table.queries == 16, "one query per shard, regardless of view size"
+
+    def test_reading_the_summary_is_one_get_not_a_query(self) -> None:
+        """It is on the critical path of every request, so it is a primary-key read
+        at a fixed key — not a query, and certainly not a count over the corpus."""
+        store, table = dynamo()
+        rows = [kept_row(1)]
+        store.save_screening(rows, summary=view_summary(rows))
+        table.gets = 0
+        table.queries = 0
+        assert store.screening_summary() is not None
+        assert (table.gets, table.queries) == (1, 0)
+
+    def test_a_page_still_fills_when_the_1mb_cut_lands_first(self) -> None:
+        """DynamoDB applies the 1 MB cut *before* ``Limit``, so a single query is
+        only guaranteed to return ``Limit`` items while rows stay small. Rows are
+        ~540 bytes today; a future field that pushed them to 40 KB would silently
+        start under-filling pages, and a short page reads as "that is all there is"."""
+        store, _ = dynamo(page_size=2)
+        rows = [kept_row(n, posted_at=DAY1 + timedelta(minutes=n)) for n in range(60)]
+        store.save_screening(rows, summary=view_summary(rows))
+        page = store.screened_page(VIEW_KEPT, generation="gen-1", limit=25)
+        assert len(page.rows) == 25
+
+    def test_every_row_carries_an_epoch_ttl(self) -> None:
+        """Stale generations are reaped by TTL because DeleteItem costs what a write
+        costs, and 84k deletes a day is real money for rows no reader can name. TTL
+        only reads **epoch seconds** — an ISO string here is silently ignored and the
+        rows live forever."""
+        store, table = dynamo()
+        rows = [kept_row(1)]
+        summary = view_summary(rows, screened_at=DAY2)
+        store.save_screening(rows, summary=summary)
+        stored = [i for k, i in table.items.items() if str(k[0]).startswith("SCREENVIEW#")]
+        assert len(stored) == 1
+        expires = stored[0]["expires_at"]
+        assert isinstance(expires, int)
+        assert expires == int(DAY2.timestamp()) + adapter.VIEW_TTL_SECONDS
+
+    def test_the_view_never_stores_a_description(self) -> None:
+        """~2.5 KB a posting and ~118 MB across the corpus. Copying it into a
+        structure that is written once per view a posting sits in would take each row
+        from 1 WCU to 3 for data the page hydrates anyway."""
+        store, table = dynamo()
+        rows = [kept_row(1), gate_row(2, Exclusion.LEVEL)]
+        store.save_screening(rows, summary=view_summary(rows))
+        for key, item in table.items.items():
+            if str(key[0]).startswith("SCREENVIEW#"):
+                assert "description" not in item
+
+    def test_two_postings_sharing_a_url_do_not_fail_the_publish(self) -> None:
+        """A company re-listing a requisition gives two postings one id, so one view
+        row key. Duplicate keys inside a BatchWriteItem are a ValidationException
+        that fails the whole run."""
+        store, _ = dynamo()
+        rows = [kept_row(1), kept_row(1)]
+        store.save_screening(rows, summary=view_summary(rows))
+        page = store.screened_page(VIEW_KEPT, generation="gen-1", limit=25)
+        assert len(page.rows) == 1
+
+    def test_throttled_rows_are_retried_until_the_view_is_whole(self) -> None:
+        """Partial throttling arrives as UnprocessedItems on an HTTP 200; code that
+        reads a 200 as "written" publishes a summary over an incomplete view."""
+        store, table = dynamo()
+        table.throttle_every = 3
+        rows = [kept_row(n, posted_at=DAY1 + timedelta(minutes=n)) for n in range(30)]
+        store.save_screening(rows, summary=view_summary(rows))
+        assert len(store.screened_page(VIEW_KEPT, generation="gen-1", limit=100).rows) == 30
+
+    def test_the_view_is_not_visible_to_the_corpus_indexes(self) -> None:
+        """View rows live in the base table beside the postings. If they leaked into
+        seen-index or the open-index they would be counted as postings and screened
+        as postings — and ``stats`` is what the run summary reports."""
+        store, _ = dynamo()
+        store.sync([post(1)], now=DAY1)
+        rows = [kept_row(1), gate_row(1, Exclusion.LEVEL)]
+        store.save_screening(rows, summary=view_summary(rows))
+        assert store.stats() == {
+            "total": 1, "open": 1, "closed": 0, "interpreted": 0, "applied": 0
+        }
+        assert len(store.open_postings()) == 1
+
+    def test_hydrating_a_page_reads_one_item_per_posting_once(self) -> None:
+        """Capped at the API's page size, so the round trips are bounded — and a
+        duplicated id in a page must not be paid for twice."""
+        store, table = dynamo()
+        store.sync([post(1), post(2)], now=DAY1)
+        table.gets = 0
+        found = store.postings_by_id([post(1).id, post(2).id, post(1).id])
+        assert len(found) == 2
+        assert table.gets == 2
+
+    def test_hydrating_is_one_get_item_per_posting_and_that_is_the_cost_to_beat(
+        self,
+    ) -> None:
+        """The number this pins is not a page — it is what a *filtered* read costs.
+
+        A page read is capped at ``MAX_LIMIT`` and so is bounded by construction. The
+        ``ats`` and ``tier`` filters are not: ``matched`` means "across the whole
+        collection", so the read walks the entire kept view and hydrates every row that
+        survives the cheap filters. One GetItem per row, at a measured ~5 ms in-region,
+        means the deployed kept view (~1,524 rows at 47,538 postings) costs ~7.6 s of
+        sequential round trips *before* any scoring — which is why ``?tier=`` is
+        expected to hit ``FILTER_SCAN_BUDGET_SECONDS`` and answer 503
+        ``filter_scan_too_slow`` there while measuring only 4.2 s against local SQLite,
+        where a hydrate is an in-process index lookup and costs nothing.
+
+        Asserted rather than left as a comment so the arithmetic is checkable, and so
+        the day someone replaces this with a 100-key BatchGetItem — the fix that turns
+        1,524 round trips into 16 — this test is what tells them the win was real.
+        """
+        store, table = dynamo()
+        postings = [post(n) for n in range(40)]
+        store.sync(postings, now=DAY1)
+        table.gets = 0
+        found = store.postings_by_id([p.id for p in postings])
+        assert len(found) == len(postings)
+        assert table.gets == len(postings), (
+            "one GetItem per posting; a batched read would make this smaller and "
+            "would make the tier filter viable at the deployed corpus size"
+        )
 
 
 class TestLazyImport:

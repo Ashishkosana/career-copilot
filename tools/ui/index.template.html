@@ -763,11 +763,40 @@ async function pickSource(){
   if (BOOT.apiBase === null) return snapshotSource('no_api_configured');
   try {
     const head = await apiGet('/worklist', { limit: '1' }, PROBE_TIMEOUT_MS);
+    // A 200 is not the same as a usable corpus. The API answers correctly with
+    // ``eligibleTotal: 0`` before the first sweep has written anything to the cloud
+    // store, and committing to live on that produced the worst output this page can
+    // produce: an empty table under a banner reading "Live ... just now". That is
+    // indistinguishable from broken software, and it is *more* misleading than a
+    // stale number, because a visitor cannot tell an empty market from an empty
+    // database. So an empty live corpus falls back to the snapshot and says why.
+    if (corpusIsEmpty(head) && snapshotHasRows()) return snapshotSource('live_corpus_empty');
     return apiSource(head);
   } catch (err) {
     const code = err instanceof SourceError ? err.code : 'unreachable';
     return snapshotSource(code);
   }
+}
+
+/** Whether a probe response describes a corpus with nothing in it.
+
+    Reads ``eligibleTotal`` rather than ``items.length`` because the probe asks for
+    one row: an empty ``items`` proves nothing when the limit is 1 and a filter is
+    in play, whereas ``eligibleTotal`` is the whole applicable set. Guarded for a
+    missing field so an older API shape degrades to "not empty" and the page keeps
+    reading live rather than silently pinning itself to the snapshot. */
+function corpusIsEmpty(head){
+  const total = head && head.eligibleTotal;
+  return typeof total === 'number' && total === 0;
+}
+
+/** Whether the baked snapshot has anything worth falling back *to*.
+
+    Without this the empty-corpus branch would swap one blank page for another and
+    lose the live reason in the process. When both are empty the page stays on live,
+    because "the API says there is nothing" is the more accurate statement. */
+function snapshotHasRows(){
+  return Array.isArray(SNAP.items) && SNAP.items.length > 0;
 }
 
 const REASON_TEXT = {
@@ -780,6 +809,35 @@ const REASON_TEXT = {
     + 'it — so nothing live could be read.',
   store_unavailable:
     'The API answered but could not read its store, so nothing live could be read.',
+  // The two states the read API answers when the daily screening pass has not left it
+  // anything to serve. Both are 503 and both are ours, but they are different facts and
+  // a visitor can act on the difference: the first says the pipeline has not run over
+  // this corpus yet, the second says it ran but too long ago to present as current.
+  // Spelled out rather than left to the generic fallback, because a bare
+  // "corpus_not_screened" on the page is indistinguishable from a crash — and telling
+  // "nothing screened yet" apart from "the service is broken" is the entire reason
+  // these are named codes instead of a timeout.
+  corpus_not_screened:
+    'The API is up, but the daily pass that decides which roles are applicable has not '
+    + 'published a result for this corpus yet, so there is nothing live to rank. These '
+    + 'rows are the snapshot this page was built with.',
+  screening_view_stale:
+    'The API is up, but its most recent screening pass is too old to show as current — '
+    + 'the daily run has missed at least two days. These rows are the snapshot this '
+    + 'page was built with.',
+  // The other two states the read API can answer, both of them about one *filter*
+  // rather than about the corpus. They matter here because a match-tier filter has to
+  // score every candidate before it can report how many matched, and that is the one
+  // read whose cost grows with the applicable list. Named for the same reason as the
+  // pair above: the filter failing is a different fact from the API failing, and only
+  // one of them is worth clearing the filter over.
+  filter_scan_too_slow:
+    'The API gave up part-way through applying that filter rather than risk timing out '
+    + '— scoring every match takes longer than it is allowed to spend. Try it again, or '
+    + 'drop the match-tier filter and page through instead.',
+  too_many_rows_to_filter:
+    'That filter would have to be applied across more roles than the API will scan in '
+    + 'one request. Page through the list instead of filtering it.',
   // Both come from handlers/public_api.py and both mean the fault is ours, not the
   // visitor's: the projection refused to publish a payload it no longer recognised, or
   // the public route lost the principal it hands the read path. Named rather than
@@ -790,6 +848,10 @@ const REASON_TEXT = {
     + 'what this page is allowed to show — a fault on our side, not yours.',
   public_route_misconfigured:
     'The public read route is misconfigured, which is a fault on our side, not yours.',
+  live_corpus_empty:
+    'The API answered, but its corpus is empty — no sweep has written to it yet, so '
+    + 'there is nothing live to show. These rows are the snapshot this page was built '
+    + 'with.',
   read_only: 'This page is read-only.',
   snapshot_cannot_page: 'The snapshot holds a fixed number of rows per gate.',
 };

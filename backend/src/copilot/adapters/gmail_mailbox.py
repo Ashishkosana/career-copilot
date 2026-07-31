@@ -199,7 +199,11 @@ def load_gmail_credentials(secret: Mapping[str, str]) -> Any | None:
         _LOG.warning("gmail_sdk_missing")
         return None
 
-    return Credentials(
+    # `Credentials` is untyped: google-auth ships no py.typed, so under strict mode this
+    # is a call to an untyped function. Ignored at the call site rather than by relaxing
+    # the module, because everything else in this file should stay fully checked — and
+    # `ignore_missing_imports` cannot cover it, since the import is present, not missing.
+    return Credentials(  # type: ignore[no-untyped-call]
         token=secret.get("token"),
         refresh_token=secret.get("refresh_token"),
         token_uri=secret.get("token_uri", "https://oauth2.googleapis.com/token"),

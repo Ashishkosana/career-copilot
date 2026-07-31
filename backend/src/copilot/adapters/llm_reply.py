@@ -38,6 +38,11 @@ _SYSTEM = (
 )
 
 
+#: A recruiter reply is a short email. Capped so a runaway generation cannot bill
+#: for a thousand-line answer to "are you available Tuesday".
+_MAX_TOKENS = 1024
+
+
 class LlmReplyDrafter:
     """LLMPort that drafts a reply via a hosted LLM (SDK imported lazily)."""
 
@@ -45,7 +50,7 @@ class LlmReplyDrafter:
         self,
         *,
         api_key: str = "",
-        model: str = "gemini-2.0-flash",
+        model: str = "claude-opus-5",
         client: Any | None = None,
         secrets: SecretsPort | None = None,
         secret_id: str = "",
@@ -65,13 +70,20 @@ class LlmReplyDrafter:
         client = self._get_client()
         if client is None:
             return None
-        resp = client.models.generate_content(
-            model=self._model, contents=self._build_prompt(email)
+        resp = client.messages.create(
+            model=self._model,
+            max_tokens=_MAX_TOKENS,
+            messages=[{"role": "user", "content": self._build_prompt(email)}],
         )
-        text = getattr(resp, "text", None)
-        if not text:
-            return None
-        drafted = str(text).strip()
+        # The response carries a list of content blocks, not a `.text`. Only text
+        # blocks are joined: a future block type would otherwise stringify into the
+        # draft as a repr, and a recruiter reply is the last place to discover that.
+        parts = [
+            block.text
+            for block in getattr(resp, "content", [])
+            if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+        ]
+        drafted = "\n".join(parts).strip()
         return drafted or None
 
     def _resolved_key(self) -> str:
@@ -98,16 +110,16 @@ class LlmReplyDrafter:
         if not api_key:
             return None
         try:
-            # Through ``import_module`` rather than ``from google import genai``
-            # so the missing-wheel path is reachable in a test. It became worth
-            # testing the moment a key could actually be resolved in the cloud:
-            # before that, ``api_key`` was always empty here and this line was
-            # dead in every deployment.
-            genai = import_module("google.genai")
+            # Through ``import_module`` rather than a top-level import so the
+            # missing-wheel path is reachable in a test. It became worth testing the
+            # moment a key could actually be resolved in the cloud: before that,
+            # ``api_key`` was always empty here and this line was dead in every
+            # deployment.
+            sdk = import_module("anthropic")
         except ImportError:
             _LOG.warning("draft_sdk_missing")
             return None
-        self._client = genai.Client(api_key=api_key)
+        self._client = sdk.Anthropic(api_key=api_key)
         return self._client
 
     @staticmethod

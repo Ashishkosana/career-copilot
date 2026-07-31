@@ -8,6 +8,7 @@ fail safe in every direction.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -19,6 +20,7 @@ from copilot.adapters.claude_interpreter import ClaudeInterpreter
 from copilot.domain.posting import Posting
 from copilot.domain.seniority import Level
 from copilot.ports.interpreter import Confidence, Interpretation
+from copilot.ports.postingstore import ScreenedPage, ScreenedRow, ScreenSummary
 
 _DESCRIPTION = (
     "About the role\n"
@@ -126,6 +128,20 @@ class _FakeStore:
     def mark_applied(self, posting_id: str, *, now: datetime) -> None:
         raise NotImplementedError
 
+    def postings_by_id(self, posting_ids: Sequence[str]) -> dict[str, Posting]:
+        raise NotImplementedError
+
+    def save_screening(self, rows: Iterable[ScreenedRow], *, summary: ScreenSummary) -> None:
+        raise NotImplementedError
+
+    def screening_summary(self) -> ScreenSummary | None:
+        raise NotImplementedError
+
+    def screened_page(
+        self, view: str, *, generation: str, limit: int, after: str | None = None
+    ) -> ScreenedPage:
+        raise NotImplementedError
+
 
 # --- prompt ------------------------------------------------------------------
 
@@ -163,7 +179,7 @@ def test_well_formed_reply_is_parsed_and_verified() -> None:
     assert interp.stats.unverified == 0
 
 
-def test_request_asks_for_structured_output_on_the_cheap_model() -> None:
+def test_request_asks_for_structured_output_on_the_configured_model() -> None:
     """Guards the two things that keep this tier cheap and parseable.
 
     Dropping ``output_config`` makes JSON parsing a failure surface again, and
@@ -173,7 +189,7 @@ def test_request_asks_for_structured_output_on_the_cheap_model() -> None:
     ClaudeInterpreter(client=client).interpret(_POSTING)
 
     sent = client.messages.calls[0]
-    assert sent["model"] == "claude-haiku-4-5"
+    assert sent["model"] == "claude-opus-5"
     schema = sent["output_config"]["format"]
     assert schema["type"] == "json_schema"
     assert schema["schema"]["required"] == ["band", "min_years", "evidence", "confidence"]
@@ -190,7 +206,9 @@ def test_usage_is_accumulated_for_cost_reporting() -> None:
 
     assert interp.stats.input_tokens == 2740
     assert interp.stats.output_tokens == 240
-    assert interp.stats.estimated_cost_usd() == pytest.approx(2740 / 1e6 + 240 / 1e6 * 5)
+    assert interp.stats.estimated_cost_usd() == pytest.approx(
+        2740 / 1e6 * 5 + 240 / 1e6 * 25
+    ), "list price is per-model; a stale constant under-reports the bill silently"
 
 
 # --- the span is an index, not proof ----------------------------------------
@@ -439,3 +457,83 @@ def test_confidence_downgrade_floors_at_low() -> None:
     assert Confidence.HIGH.downgraded() is Confidence.MEDIUM
     assert Confidence.MEDIUM.downgraded() is Confidence.LOW
     assert Confidence.LOW.downgraded() is Confidence.LOW
+
+
+class _AuthError(Exception):
+    """Stands in for the SDK's ``AuthenticationError`` (401).
+
+    Matched by class *name*, because the adapter imports the SDK lazily and must not
+    import it just to catch it.
+    """
+
+    __name__ = "AuthenticationError"
+
+
+class _Overloaded(Exception):
+    """A transient 529. Must NOT trip the breaker."""
+
+
+class _RaisingClient:
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.calls = 0
+        self.messages = self
+
+    def create(self, **_: object) -> object:
+        self.calls += 1
+        raise self._exc
+
+
+class TestAuthFailureStopsTheBatch:
+    """A rejected credential is not a per-posting problem.
+
+    Measured before the breaker existed: 12 postings produced 12 failed calls, so the
+    real corpus of 631 needing interpretation would produce 631 — each one re-proving
+    the same 401 on a run that already uses 786 s of its 900 s budget. Found by storing
+    a `claude setup-token` (`sk-ant-oat01-`) and watching it fail once per posting.
+    """
+
+    @staticmethod
+    def _postings(n: int) -> list[Posting]:
+        return [
+            _POSTING.model_copy(update={"url": f"https://x/{i}"}) for i in range(n)
+        ]
+
+    def test_a_401_stops_after_the_first_posting(self) -> None:
+        client = _RaisingClient(type("AuthenticationError", (Exception,), {})())
+        interp = ClaudeInterpreter(client=client)
+
+        out = interp.interpret_many(self._postings(12))
+
+        assert out == {}
+        assert client.calls == 1, "a rejected key must not be re-proven per posting"
+        assert interp.stats.failures == 1
+
+    def test_a_transient_error_does_not_stop_the_batch(self) -> None:
+        """The breaker must stay narrow: the next posting may well succeed."""
+        client = _RaisingClient(type("APIStatusError", (Exception,), {})())
+        interp = ClaudeInterpreter(client=client)
+
+        interp.interpret_many(self._postings(5))
+
+        assert client.calls == 5, "a transient failure is per-posting, not terminal"
+
+    def test_a_403_also_stops(self) -> None:
+        client = _RaisingClient(type("PermissionDeniedError", (Exception,), {})())
+        interp = ClaudeInterpreter(client=client)
+        interp.interpret_many(self._postings(6))
+        assert client.calls == 1
+
+    def test_the_breaker_is_per_instance_so_the_next_run_retries(self) -> None:
+        """Fixing the key must take effect on the next sweep with nothing to reset.
+
+        The cron builds a fresh interpreter each run and re-reads the parameter, so
+        the flag must not outlive the instance.
+        """
+        first = _RaisingClient(type("AuthenticationError", (Exception,), {})())
+        ClaudeInterpreter(client=first).interpret_many(self._postings(4))
+        assert first.calls == 1
+
+        second = _RaisingClient(type("AuthenticationError", (Exception,), {})())
+        ClaudeInterpreter(client=second).interpret_many(self._postings(4))
+        assert second.calls == 1, "a new instance must try again, not inherit the flag"

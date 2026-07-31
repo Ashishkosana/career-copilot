@@ -2,6 +2,17 @@
 
 Every test below names the failure it prevents. The ones that matter most:
 
+* **a read that screens the corpus**, which is what took every request to 39 s
+  locally and ~72 s at the deployed size and 504'd against API Gateway's 29 s
+  ceiling. Asserted twice: no route may touch ``open_postings``, and the module may
+  not even name it;
+* an unscreened corpus answered with a hang instead of a state — a 29-second timeout
+  is indistinguishable from an outage, and "nothing has been screened yet" is a
+  different fact from "the service is broken";
+* rows published without their summary read as an authoritative empty view, which is
+  exactly the shape the first live cron crash left behind;
+* a total recounted from the page instead of taken from the summary, because
+  recounting is how a read starts touching the corpus again;
 * an offset page 2 silently *skips* a posting when a row closes between requests;
 * a missing description serialised as ``""`` reads as "a role with nothing to say"
   and passes every description-based gate;
@@ -19,7 +30,8 @@ import ast
 import base64
 import json
 from collections.abc import Iterable, Sequence
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +46,18 @@ from copilot.domain.posting import Posting
 # is a domain fact, not part of the API module's surface.
 from copilot.domain.screening import Exclusion
 from copilot.handlers import worklist_api as api
-from copilot.ports.postingstore import PostingStorePort
+from copilot.ports.postingstore import (
+    SCREEN_VIEWS,
+    PostingStorePort,
+    ScreenedPage,
+    ScreenedRow,
+    ScreenSummary,
+)
+
+# The view is built by the cron's own builder, not by a fixture that mimics it — see
+# ``FakePostingStore``. This is the one import in this file that is deliberately not
+# a fake.
+from copilot.services.daily_briefing import build_screening_view
 
 NOW = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
 SUB = "user-123"
@@ -68,39 +91,128 @@ Requirements
 
 RESUME = "Python, PostgreSQL, AWS, Lambda, DynamoDB, Flutter, pytest"
 
+#: A non-UTC offset a real ATS actually sends, for the one test that needs the
+#: displayed date to differ from the UTC-normalised sort key.
+FIVE_HOURS_AHEAD = timezone(timedelta(hours=5))
+
 
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
 
 class FakePostingStore:
-    """In-memory PostingStorePort. ``raises`` reproduces a store outage.
+    """In-memory ``PostingStorePort`` that also plays the cron.
 
-    ``calls`` is the audit trail the no-submit test reads: the applied path must
-    touch exactly one store method and nothing else.
+    Construction screens the postings and publishes the view through the *real*
+    builder, ``services.daily_briefing.build_screening_view``. That coupling is
+    deliberate. These tests are about a reader that consumes what a writer produced,
+    and a hand-rolled view here would only ever prove that the reader agrees with
+    itself — which is precisely how the DynamoDB key-schema bug survived: a double
+    derived from the code under test.
+
+    ``rescreen`` is a second cron run, ``publish=False`` is a cron that died between
+    the rows and the summary, and ``doctor_summary`` publishes counts the rows cannot
+    support, which is how "the totals come from the summary" is tested as a property
+    rather than by reading the handler.
+
+    ``calls`` is the audit trail two guarantees read: that a read never touches the
+    whole corpus, and that the applied path touches exactly one write.
     """
 
-    def __init__(self, postings: Iterable[Posting] = (), *, raises: bool = False) -> None:
+    def __init__(
+        self,
+        postings: Iterable[Posting] = (),
+        *,
+        raises: bool = False,
+        screened: bool = True,
+        now: datetime = NOW,
+        publish: bool = True,
+    ) -> None:
         self.postings = list(postings)
-        self.raises = raises
+        self.raises = False
         self.applied: dict[str, datetime] = {}
         self.calls: list[str] = []
-        self.reads = 0
+        self.summary_reads = 0
+        self._views: dict[str, tuple[ScreenedRow, ...]] = {}
+        self._summary: ScreenSummary | None = None
+        if screened:
+            self.rescreen(now=now, publish=publish)
+        # Setting up the view is the cron's work, not a request's: the audit trail
+        # starts empty, and ``raises`` only breaks the reads actually under test.
+        self.calls.clear()
+        self.raises = raises
 
-    def _boom(self, what: str) -> None:
+    # --- playing the cron ----------------------------------------------------
+
+    def rescreen(self, *, now: datetime = NOW, publish: bool = True) -> None:
+        """Screen the corpus and publish the view, exactly as the cron does.
+
+        ``publish=False`` stops after the rows. That is not a hypothetical: the first
+        live cron run crashed after the corpus landed and before the run finished, and
+        a reader must call the result "not screened" rather than "screened, 0 kept".
+        """
+        view = build_screening_view(self.postings, now=now)
+        if publish:
+            self.save_screening(view.rows, summary=view.summary)
+        else:
+            self._views[view.summary.generation] = tuple(view.rows)
+
+    def doctor_summary(self, **overrides: Any) -> None:
+        """Republish the current summary with different numbers on it."""
+        assert self._summary is not None
+        self._summary = replace(self._summary, **overrides)
+
+    # --- the corpus ----------------------------------------------------------
+
+    def _note(self, what: str) -> None:
         self.calls.append(what)
         if self.raises:
             raise RuntimeError("sqlite file is gone")
 
     def open_postings(self) -> list[Posting]:
-        self._boom("open_postings")
-        self.reads += 1
+        self._note("open_postings")
         return list(self.postings)
 
+    def postings_by_id(self, posting_ids: Sequence[str]) -> dict[str, Posting]:
+        self._note("postings_by_id")
+        wanted = set(posting_ids)
+        return {p.id: p for p in self.postings if p.id in wanted}
+
     def mark_applied(self, posting_id: str, *, now: datetime) -> None:
-        self._boom("mark_applied")
+        self._note("mark_applied")
         # Mirrors the SQL guard: `applied_at IS NULL`, so a repeat is a no-op.
         self.applied.setdefault(posting_id, now)
+
+    # --- the materialised screening view -------------------------------------
+
+    def save_screening(self, rows: Iterable[ScreenedRow], *, summary: ScreenSummary) -> None:
+        self._note("save_screening")
+        # Rows first, summary second — the order *is* the publish, so the fake has to
+        # honour it or the ``publish=False`` case above would be untestable.
+        self._views[summary.generation] = tuple(rows)
+        self._summary = summary
+
+    def screening_summary(self) -> ScreenSummary | None:
+        self._note("screening_summary")
+        self.summary_reads += 1
+        return self._summary
+
+    def screened_page(
+        self, view: str, *, generation: str, limit: int, after: str | None = None
+    ) -> ScreenedPage:
+        self._note("screened_page")
+        if view not in SCREEN_VIEWS:
+            raise ValueError(f"unknown screening view {view!r}")
+        rows = sorted(
+            (row for row in self._views.get(generation, ()) if row.view == view),
+            key=lambda row: row.sort_key,
+            reverse=True,
+        )
+        if after is not None:
+            rows = [row for row in rows if row.sort_key < after]
+        window = tuple(rows[:limit])
+        next_token = window[-1].sort_key if len(rows) > limit and window else None
+        return ScreenedPage(rows=window, next_token=next_token)
 
     # --- rest of the port, unused by the read API but part of the contract ---
     def sync(self, postings: list[Posting], *, now: datetime) -> tuple[list[str], list[str]]:
@@ -123,7 +235,7 @@ class FakePostingStore:
 def test_fake_satisfies_the_port() -> None:
     """If the port grows a method, this fake must grow with it."""
     store: PostingStorePort = FakePostingStore()
-    assert store.open_postings() == []
+    assert store.screening_summary() is not None
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +250,7 @@ def make(
     desc: str = JD_BACKEND,
     has_desc: bool | None = None,
     day: int = 1,
-    posted_at: datetime | None | str = "auto",
+    posted_at: datetime | str | None = "auto",
     url: str | None = None,
     employment_type: str = "",
 ) -> Posting:
@@ -194,14 +306,239 @@ def body_of(response: dict[str, Any]) -> dict[str, Any]:
     return parsed
 
 
-def worklist(store: FakePostingStore, **kwargs: Any) -> dict[str, Any]:
-    resp = api.list_worklist(store, event(**kwargs), resume_text=RESUME, now=NOW)
+def worklist(store: FakePostingStore, *, at: datetime = NOW, **kwargs: Any) -> dict[str, Any]:
+    resp = api.list_worklist(store, event(**kwargs), resume_text=RESUME, now=at)
     assert resp["statusCode"] == 200, resp["body"]
     return body_of(resp)
 
 
 def ids_of(page: dict[str, Any]) -> list[str]:
     return [item["id"] for item in page["items"]]
+
+
+# ---------------------------------------------------------------------------
+# The read consumes the view. This section is the fix.
+# ---------------------------------------------------------------------------
+
+def every_read(store: FakePostingStore, posting: Posting) -> None:
+    """Drive all five routes once, the way the page and the UI build do."""
+    api.list_worklist(store, event(), resume_text=RESUME, now=NOW)
+    api.list_internships(store, event(path="/internships"), resume_text=RESUME, now=NOW)
+    api.list_excluded(store, event(path="/excluded"), now=NOW)
+    api.get_posting(store, event(path_params={"id": posting.id}), now=NOW)
+    api.record_applied(store, applied_event(posting.id), now=NOW)
+
+
+class TestTheReadNeverScreensTheCorpus:
+    """The production 504, and the two assertions that keep it dead.
+
+    Measured before this change: ``open_postings`` returned 25,294 rows in 1.7 s and
+    screening them took 37.8 s — 1.506 ms each, so ~72 s at the deployed 47,538. API
+    Gateway's REST integration ceiling is 29 s, hard. ``?limit=1`` did not help,
+    because ``limit`` is applied after screening: ``eligibleTotal`` and the funnel
+    describe the whole set.
+    """
+
+    def test_no_route_reads_the_whole_corpus(self) -> None:
+        posting = make()
+        store = FakePostingStore([posting, an_internship()])
+        every_read(store, posting)
+        assert "open_postings" not in store.calls
+        assert set(store.calls) == {
+            "screening_summary", "screened_page", "postings_by_id", "mark_applied"
+        }
+
+    def test_the_module_does_not_even_name_open_postings(self) -> None:
+        """Structural, so a future edit cannot reintroduce it behind a flag or a retry.
+
+        The call-log test above only proves nothing reached it *on these paths*; this
+        one proves there is no path at all.
+        """
+        tree = ast.parse(Path(api.__file__).read_text())
+        reached = {
+            node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+        }
+        assert "open_postings" not in reached
+
+    def test_a_page_reads_one_page_and_not_one_row_per_posting(self) -> None:
+        """O(page), not O(corpus): the property the whole materialisation buys."""
+        store = FakePostingStore(make(day=d, url=f"https://x/{d}") for d in range(1, 29))
+        page = worklist(store, query={"limit": "25"})
+        assert page["page"]["count"] == 25
+        # One summary read, one view query, one batched hydrate. Nothing per posting.
+        assert store.calls == ["screening_summary", "screened_page", "postings_by_id"]
+
+    def test_the_totals_are_the_summarys_and_are_not_recounted(self) -> None:
+        """A recount is a read that touches the corpus, which is the bug.
+
+        The summary here claims a 47,538-posting pass over a store holding one row. A
+        handler deriving its funnel from the page would answer 1 and look correct in
+        every other test in this file.
+        """
+        store = FakePostingStore([make(title="Junior Software Engineer")])
+        store.doctor_summary(
+            screened=47538, kept=811, excluded=46727, eligible_total=811,
+            internship_total=48, needs_level_check=631,
+            gates={Exclusion.INTERNSHIP.value: 318},
+        )
+        page = worklist(store)
+        assert page["funnel"]["screened"] == 47538
+        assert page["funnel"]["excluded"] == 46727
+        assert page["funnel"]["needsLevelCheck"] == 631
+        assert page["eligibleTotal"] == 811
+        assert page["internshipTotal"] == 48
+        # Reconciliation the published page displays: the gate fires 318 times while
+        # the collection is 48 postings, and both numbers travel in one payload.
+        assert page["funnel"]["gates"][Exclusion.INTERNSHIP.value] == 318
+        assert page["page"]["count"] == 1  # the page is still just the page
+
+    def test_generated_at_is_when_the_corpus_was_screened(self) -> None:
+        """Not "now": claiming freshness for a twenty-hour-old pass is a lie in a field."""
+        screened = NOW - timedelta(hours=20)
+        store = FakePostingStore([make()], now=screened)
+        page = worklist(store)
+        assert page["generatedAt"] == screened.isoformat()
+
+    def test_a_republished_view_is_served_and_the_old_pass_is_not(self) -> None:
+        """A page must never mix two screening passes; the generation is what prevents it."""
+        first, second = make(day=1, url="https://x/1"), make(day=2, url="https://x/2")
+        store = FakePostingStore([first])
+        later = NOW + timedelta(hours=1)
+        store.postings.append(second)
+        store.rescreen(now=later)
+        page = worklist(store, at=later)
+        assert set(ids_of(page)) == {first.id, second.id}
+        assert page["generatedAt"] == later.isoformat()
+
+
+class TestNotReadyIsAnAnswer:
+    """"Nothing has been screened yet" must be distinguishable from "we are broken".
+
+    Today both were a 29-second hang, which is the worst of the three outcomes: a
+    timeout tells a visitor nothing and tells a monitor the wrong thing.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "handler", "raw"),
+        [
+            ("worklist", api.list_worklist, event()),
+            ("internships", api.list_internships, event(path="/internships")),
+            ("excluded", api.list_excluded, event(path="/excluded")),
+        ],
+    )
+    def test_an_unscreened_corpus_is_a_named_state(
+        self, name: str, handler: Any, raw: dict[str, Any]
+    ) -> None:
+        store = FakePostingStore([make()], screened=False)
+        resp = handler(store, raw, now=NOW)
+        assert resp["statusCode"] == 503
+        assert body_of(resp) == {"error": api.NOT_SCREENED}
+        # And emphatically not by screening live, which is what 504s.
+        assert "open_postings" not in store.calls
+
+    def test_rows_without_their_summary_are_not_an_empty_view(self) -> None:
+        """The first live cron crashed mid-run. Its half-written view must not publish.
+
+        The summary is written last precisely so its absence means "incomplete", and a
+        reader that paged the rows anyway would serve a partial screen as authoritative
+        — or, worse, report "0 eligible of 0 screened", which reads as a working search
+        that found nothing.
+        """
+        store = FakePostingStore([make(title="Junior Software Engineer")], publish=False)
+        resp = api.list_worklist(store, event(), resume_text=RESUME, now=NOW)
+        assert resp["statusCode"] == 503
+        assert body_of(resp) == {"error": api.NOT_SCREENED}
+
+    def test_one_missed_cron_run_still_serves(self) -> None:
+        """The grace period is a day and a half, so a single failed run is not an outage."""
+        store = FakePostingStore([make()], now=NOW - timedelta(hours=30))
+        assert worklist(store)["page"]["count"] == 1
+
+    def test_two_missed_runs_are_refused_rather_than_served_quietly(self) -> None:
+        """There is no field on the wire for "shown, but three days old".
+
+        Serving it silently is how a dead cron goes unnoticed — the failure mode this
+        whole project has already been bitten by twice.
+        """
+        store = FakePostingStore([make()], now=NOW - timedelta(hours=60))
+        resp = api.list_worklist(store, event(), resume_text=RESUME, now=NOW)
+        assert resp["statusCode"] == 503
+        assert body_of(resp) == {"error": api.VIEW_STALE}
+
+    def test_a_view_stamped_in_the_future_is_refused(self) -> None:
+        """Writer and reader clocks disagree; serving it reports a date nothing explains."""
+        store = FakePostingStore([make()], now=NOW + timedelta(hours=2))
+        resp = api.list_worklist(store, event(), resume_text=RESUME, now=NOW)
+        assert resp["statusCode"] == 503
+        assert body_of(resp) == {"error": api.VIEW_STALE}
+
+    def test_a_detail_read_works_with_no_view_at_all(self) -> None:
+        """It re-screens one posting (1.5 ms), so it needs no pass to have happened.
+
+        Worth keeping: the trust surface's click-through is the one read that still
+        answers while the corpus is unscreened.
+        """
+        posting = make(title="Junior Software Engineer")
+        store = FakePostingStore([posting], screened=False)
+        resp = api.get_posting(
+            store, event(path_params={"id": posting.id}), resume_text=RESUME, now=NOW
+        )
+        assert resp["statusCode"] == 200
+        assert body_of(resp)["posting"]["screening"]["kept"] is True
+        assert "screening_summary" not in store.calls
+
+    def test_applied_records_with_no_view_at_all(self) -> None:
+        """A human's click must not be lost because the cron has not run."""
+        posting = make()
+        store = FakePostingStore([posting], screened=False)
+        resp = api.record_applied(store, applied_event(posting.id), now=NOW)
+        assert resp["statusCode"] == 200
+        assert store.applied == {posting.id: NOW}
+
+
+class TestHydrationGaps:
+    """The corpus moves under a reader: a row can outlive the posting it points at."""
+
+    def test_a_reaped_posting_costs_its_row_not_the_request(self) -> None:
+        """The port's contract, and the alternative is a 500 for one missing row."""
+        rows = [make(day=d, url=f"https://x/{d}") for d in range(1, 4)]
+        store = FakePostingStore(rows)
+        store.postings = [p for p in rows if p.url != "https://x/2"]  # reaped, not rescreened
+        page = worklist(store)
+        assert len(page["items"]) == 2
+        assert page["matched"] == 3  # the summary still describes the pass that ran
+
+    def test_a_reaped_posting_does_not_stall_pagination(self) -> None:
+        """The gap must still advance the cursor, or page 2 starts before it forever."""
+        rows = [make(day=d, url=f"https://x/{d}") for d in range(1, 6)]
+        store = FakePostingStore(rows)
+        store.postings = [p for p in rows if p.url != "https://x/4"]
+        seen = paginate(store, limit=2)
+        assert len(seen) == len(set(seen)) == 4
+
+
+def test_a_card_from_the_view_matches_a_card_from_a_fresh_screen() -> None:
+    """The list card and the detail card must not disagree about the same posting.
+
+    A card's verdict comes from a stored row; a detail read re-screens. The mapping
+    from a verdict to those fields therefore exists twice — here in
+    ``Screened.from_decision`` and in ``services/daily_briefing._row`` — because the
+    writer cannot import the reader. Drift would show one seniority band on a card and
+    a different one on that card's own page, and nothing else in either suite would
+    notice.
+    """
+    posting = make(title="Junior Software Engineer")
+    store = FakePostingStore([posting])
+    card = worklist(store)["items"][0]
+    found = body_of(
+        api.get_posting(
+            store, event(path_params={"id": posting.id}), resume_text=RESUME, now=NOW
+        )
+    )["posting"]
+    assert {key: found[key] for key in card if key != "score"} == {
+        key: value for key, value in card.items() if key != "score"
+    }
+    assert card["score"] == found["score"]
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +566,12 @@ class TestWorklistShape:
         assert ids_of(page) == [recent.id, older.id, undated.id]
 
     def test_naive_posted_at_does_not_crash_the_sort(self) -> None:
-        """Nothing in Posting forces a tz; comparing naive with aware raises TypeError."""
+        """Nothing in Posting forces a tz; a naive value used to raise TypeError.
+
+        The order now lives in the stored sort key, which ``sort_stamp`` normalises to
+        UTC — so this asserts the reader agrees with that normalisation rather than
+        re-deriving an ordering of its own.
+        """
         naive = make(title="Junior Software Engineer", posted_at=datetime(2026, 7, 15, 9, 0))
         aware = make(title="Software Engineer I", day=2, url="https://x/aware")
         page = worklist(FakePostingStore([aware, naive]))
@@ -299,6 +641,18 @@ class TestScoringDegradation:
         )
         assert resp["statusCode"] == 400
         assert body_of(resp) == {"error": "scoring_unavailable"}
+
+    def test_the_score_is_not_stored_so_a_new_resume_reranks_immediately(self) -> None:
+        """A baked score would misrank silently: the résumé changes, the corpus does not.
+
+        Same store, same view, two résumés — the tiers must differ, which they can only
+        do if the score is computed per request.
+        """
+        store = FakePostingStore([make(title="Junior Software Engineer")])
+        rich = body_of(api.list_worklist(store, event(), resume_text=RESUME, now=NOW))
+        thin = body_of(api.list_worklist(store, event(), resume_text="Excel", now=NOW))
+        assert rich["items"][0]["score"]["tier"] == "strong"
+        assert thin["items"][0]["score"]["tier"] != "strong"
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +726,24 @@ class TestFilters:
         assert ids_of(worklist(store, query={"ats": "GREENHOUSE"})) == [entry.id]
         assert len(ids_of(worklist(store, query={"level": "unknown,entry"}))) == 2
 
+    def test_a_band_filter_is_answered_from_the_view_without_hydrating_everything(
+        self,
+    ) -> None:
+        """The band is *on* the row, so narrowing by it costs the walk and nothing else.
+
+        Worth pinning because the alternative — hydrating the whole view to read a
+        field the view already stores — is how an O(page) read quietly becomes O(view).
+        """
+        store = FakePostingStore(
+            make(title="Junior Software Engineer", day=d, url=f"https://x/{d}")
+            for d in range(1, 20)
+        )
+        page = worklist(store, query={"level": "entry", "limit": "5"})
+        assert page["matched"] == 19
+        assert page["page"]["count"] == 5
+        # One hydrate, for the page — not one per store page of the walk.
+        assert store.calls.count("postings_by_id") == 1
+
     def test_repeated_parameters_are_not_lost(self) -> None:
         """REST APIs put repeats in multiValueQueryStringParameters and nowhere else."""
         unknown = make(title="Software Engineer", url="https://x/u")
@@ -407,6 +779,84 @@ class TestFilters:
         assert page["filters"]["tier"] == ["exact match", "strong"]
         assert page["matched"] == 1
         assert worklist(store, query={"tier": "weak"})["matched"] == 0
+
+    def test_a_view_too_large_to_filter_exactly_is_refused_before_any_work(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The one branch where a read could start growing with the corpus again.
+
+        ``ats`` and ``tier`` are not in the view, so an exact ``matched`` costs a
+        hydrate — and for ``tier`` a score, measured at 5.1 ms a posting — per candidate
+        row. Affordable over 811 kept postings and not over 47,538, so the bound is
+        enforced rather than assumed. Refused against the summary's own total, so it
+        costs one read rather than the scan it is refusing to do.
+        """
+        store = FakePostingStore([make(day=d, url=f"https://x/{d}") for d in range(1, 4)])
+        monkeypatch.setattr(api, "FILTER_SCAN_MAX_ROWS", 2)
+        resp = api.list_worklist(
+            store, event(query={"ats": "greenhouse"}), resume_text=RESUME, now=NOW
+        )
+        assert resp["statusCode"] == 400
+        assert body_of(resp) == {"error": api.TOO_MANY_ROWS}
+        assert "screened_page" not in store.calls  # refused before the first row
+        # Unfiltered paging is unaffected: that path never scans.
+        assert worklist(store)["page"]["count"] == 3
+
+    def test_a_walk_that_runs_out_of_time_gives_up_with_the_ceiling_in_hand(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The row bound is a proxy for time; this is the invariant itself.
+
+        Scoring is 5.1 ms a posting against the real corpus and it scales with the
+        résumé, so the rows-to-seconds constant is not stable — the day the résumé grows,
+        a row bound protects nothing. A walk that has spent its budget answers 503 with
+        23 s of the gateway's 29 s still unspent, rather than being killed at 29 s and
+        looking like an outage.
+        """
+        store = FakePostingStore(
+            make(title="Junior Software Engineer", day=d, url=f"https://x/{d}")
+            for d in range(1, 12)
+        )
+        monkeypatch.setattr(api, "SCAN_PAGE_ROWS", 2)  # force several store pages
+        monkeypatch.setattr(api, "FILTER_SCAN_BUDGET_SECONDS", -1.0)  # already spent
+        resp = api.list_worklist(
+            store, event(query={"level": "entry"}), resume_text=RESUME, now=NOW
+        )
+        # 503 and its own code: unlike the size bound this one really can come out
+        # differently next time, so a retry is honest advice rather than a loop.
+        assert resp["statusCode"] == 503
+        assert body_of(resp) == {"error": api.SCAN_TOO_SLOW}
+
+    def test_a_walk_that_never_finishes_refuses_rather_than_reporting_a_short_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The page bound used to end the loop and return what it had.
+
+        ``_MAX_SCAN_PAGES`` is a belt on the two real bounds and it cannot be reached
+        while a store returns full pages. The reason it must not simply fall out of the
+        loop is what happens if one ever does not: ``matched`` is reported as the *exact*
+        number of rows matching across the whole collection, so a truncated walk
+        publishes a wrong total on the trust surface with nothing anywhere saying it is
+        short. A wrong count that looks right is the failure mode this rewrite exists to
+        remove; a 503 is the lesser answer.
+
+        Driven by a store that promises another page forever, which is the only shape
+        that gets here.
+        """
+        store = FakePostingStore([make(title="Junior Software Engineer")])
+        real_page = store.screened_page
+
+        def never_ends(view: str, **kwargs: Any) -> ScreenedPage:
+            page = real_page(view, **kwargs)
+            # Same rows, but always "there is more" — a short page plus a next token.
+            return ScreenedPage(rows=page.rows, next_token=page.next_token or "9999")
+
+        monkeypatch.setattr(store, "screened_page", never_ends)
+        resp = api.list_worklist(
+            store, event(query={"level": "entry"}), resume_text=RESUME, now=NOW
+        )
+        assert resp["statusCode"] == 503
+        assert body_of(resp) == {"error": api.SCAN_TOO_SLOW}
 
     @pytest.mark.parametrize(
         ("param", "value", "code"),
@@ -471,6 +921,19 @@ class TestAgeWindow:
         asked = worklist(store, query={"postedAfter": "2020-01-01", "includeUndated": "true"})
         assert ids_of(asked) == [undated.id]
 
+    def test_an_offset_posted_at_comes_back_as_the_instant_it_names(self) -> None:
+        """The stored sort key is UTC-normalised; the *displayed* date is the posting's.
+
+        Both stores keep the ordering byte-comparable by normalising, which is why the
+        card's ``postedAt`` is taken from the hydrated posting rather than from the row
+        — the row would report ``04:00+00:00`` for a posting whose ATS said
+        ``09:00+05:00``.
+        """
+        offset = datetime(2026, 7, 15, 9, 0, tzinfo=UTC).astimezone(FIVE_HOURS_AHEAD)
+        posting = make(title="Junior Software Engineer", posted_at=offset)
+        page = worklist(FakePostingStore([posting]))
+        assert page["items"][0]["postedAt"] == offset.isoformat()
+
 
 # ---------------------------------------------------------------------------
 # Pagination
@@ -512,19 +975,39 @@ class TestPagination:
         postings = [make(day=d, url=f"https://x/{d}") for d in range(1, 8)]
         store = FakePostingStore(postings)
         first = worklist(store, query={"limit": "3"})
-        # Newest first, so page 1 is days 7,6,5. Day 7 then closes.
+        # Newest first, so page 1 is days 7,6,5. Day 7 then closes and the cron
+        # republishes the view without it.
         store.postings = [p for p in postings if p.url != "https://x/7"]
+        store.rescreen()
         second = worklist(store, query={"limit": "3", "cursor": first["page"]["nextCursor"]})
         # Anchored to day 5, so day 4 is next. An offset of 3 into the now-shorter
         # list [6,5,4,3,2,1] would have started at day 3 and lost day 4 entirely.
         wanted = {"https://x/4", "https://x/3", "https://x/2"}
         assert ids_of(second) == [p.id for p in reversed(postings) if p.url in wanted]
 
+    def test_a_cursor_survives_the_nightly_republish(self) -> None:
+        """A cursor anchors to a posting, not to a pass — so the generation stays out of it.
+
+        Folding the generation into the fingerprint would be the "safe" choice and
+        would refuse every in-flight "load more" once a day, for no benefit: keyset
+        paging is already correct across a corpus that changed underneath it.
+        """
+        postings = [make(day=d, url=f"https://x/{d}") for d in range(1, 7)]
+        store = FakePostingStore(postings)
+        first = worklist(store, query={"limit": "2"})
+        store.rescreen(now=NOW + timedelta(hours=1))
+        second = worklist(
+            store,
+            at=NOW + timedelta(hours=1),
+            query={"limit": "2", "cursor": first["page"]["nextCursor"]},
+        )
+        assert not set(ids_of(first)) & set(ids_of(second))
+
     def test_a_cursor_past_the_end_is_an_empty_page_not_an_error(self) -> None:
         store = FakePostingStore([make(day=5, url="https://x/5")])
         page = worklist(store, query={"limit": "1"})
         assert page["page"]["nextCursor"] is None  # single row, nothing after it
-        # A well-formed cursor positioned after every row: the epoch sorts last.
+        # A well-formed cursor positioned after every row: undated sorts last.
         beyond = worklist(store, query={"limit": "1", "cursor": _cursor_after_everything()})
         assert beyond["items"] == []
         assert beyond["page"]["hasMore"] is False
@@ -568,13 +1051,33 @@ class TestPagination:
         assert resp["statusCode"] == 400
         assert body_of(resp) == {"error": "cursor_filter_mismatch"}
 
+    def test_a_filtered_list_pages_without_repeating_a_row(self) -> None:
+        """The filtered branch does its own window arithmetic, so it gets its own walk."""
+        store = FakePostingStore(
+            make(title="Junior Software Engineer", day=d, url=f"https://x/{d}")
+            for d in range(1, 12)
+        )
+        seen: list[str] = []
+        cursor: str | None = None
+        for _ in range(10):
+            query = {"limit": "4", "level": "entry"}
+            if cursor:
+                query["cursor"] = cursor
+            page = worklist(store, query=query)
+            assert page["matched"] == 11  # the whole view, every page, not the page
+            seen.extend(ids_of(page))
+            cursor = page["page"]["nextCursor"]
+            if cursor is None:
+                break
+        assert len(seen) == len(set(seen)) == 11
+
 
 def _fingerprint() -> str:
     return api.WorklistFilters().fingerprint
 
 
 def _cursor_after_everything() -> str:
-    """A well-formed cursor whose key sorts after every real row (the epoch is last)."""
+    """A well-formed cursor whose key sorts after every real row (undated is last)."""
     payload = json.dumps(
         {"v": api.CURSOR_VERSION, "ts": None, "id": "z" * 32, "f": _fingerprint()},
         separators=(",", ":"),
@@ -629,6 +1132,13 @@ class TestGetPosting:
         assert exclusion["gate"] == "citizenship_or_itar_restricted"
         assert "citizen" in exclusion["quote"]
 
+    def test_a_detail_read_costs_one_lookup_and_one_screen(self) -> None:
+        """No view, no page, no walk — that is why it can be exact about all seven gates."""
+        posting = make()
+        store = FakePostingStore([posting])
+        api.get_posting(store, event(path_params={"id": posting.id}), now=NOW)
+        assert store.calls == ["postings_by_id"]
+
 
 # ---------------------------------------------------------------------------
 # GET /excluded
@@ -672,6 +1182,20 @@ class TestExcluded:
         role = group_for(page, "not_a_software_role")["items"][0]
         assert role["quote"] == "Account Executive"
 
+    def test_the_evidence_is_the_pass_s_own_and_is_not_re_derived(self) -> None:
+        """A quote read off the row provably belongs to the pass whose counts sit beside it.
+
+        Re-screening to fill this in would be the read path screening again, one gate at
+        a time — and would let a gate's evidence describe a different pass than its
+        count.
+        """
+        store = FakePostingStore([make(title="Account Executive")])
+        page = excluded(store)
+        assert group_for(page, "not_a_software_role")["items"][0]["quote"] == "Account Executive"
+        # Seven gate views plus one hydrate each; no screen, no corpus read.
+        assert store.calls.count("screened_page") == len(Exclusion)
+        assert "open_postings" not in store.calls
+
     def test_a_posting_failing_two_gates_appears_in_both_groups(self) -> None:
         """Which is exactly why the per-gate counts overcount, and why we say so."""
         posting = make(
@@ -698,11 +1222,23 @@ class TestExcluded:
         assert len(quote) < len(description) / 4
 
     def test_an_absurdly_long_title_is_still_capped(self) -> None:
-        """Real Workday titles run to hundreds of characters; the quote is an excerpt."""
+        """Real Workday titles run to hundreds of characters; the quote is an excerpt.
+
+        Capped at the point the row is *written* now, which is the stronger place for
+        it: the 180-character promise no longer depends on a serialiser remembering to
+        trim what the store handed it.
+        """
         page = excluded(FakePostingStore([make(title="Program Manager " * 40)]))
         quote = group_for(page, "not_a_software_role")["items"][0]["quote"]
         assert len(quote) == api.QUOTE_MAX_CHARS
         assert quote.endswith("…")
+
+    def test_a_gate_with_no_quotable_phrase_reports_null_not_an_empty_string(self) -> None:
+        """The demo-board gate's evidence is the tenant slug, which ``reason`` names."""
+        page = excluded(FakePostingStore([make(company="leverdemo")]))
+        [row] = group_for(page, "ats_vendor_demo_board")["items"]
+        assert row["quote"] is None
+        assert "demo board" in row["reason"]
 
     def test_groups_are_paged(self) -> None:
         store = FakePostingStore(
@@ -725,6 +1261,17 @@ class TestExcluded:
         assert len(second["groups"]) == 1
         first_ids = {item["id"] for item in group["items"]}
         assert not first_ids & {item["id"] for item in second["groups"][0]["items"]}
+
+    def test_a_group_reads_a_page_and_not_its_whole_gate(self) -> None:
+        """The largest real gate holds ~41,500 rows; a page of ten must read ten."""
+        store = FakePostingStore(
+            make(title="Program Manager", day=d, url=f"https://x/{d}") for d in range(1, 20)
+        )
+        page = excluded(store, query={"gate": "not_a_software_role", "limit": "3"})
+        group = page["groups"][0]
+        assert group["count"] == 19  # from the summary
+        assert group["page"]["count"] == 3
+        assert store.calls.count("screened_page") == 1
 
     def test_a_cursor_without_a_gate_is_refused(self) -> None:
         """A boundary in "all gates" is ambiguous — a posting sits in several groups."""
@@ -803,6 +1350,11 @@ class TestInternshipsCollection:
         section = internships(store)
         assert ids_of(section) == [intern.id]
         assert section["items"][0]["score"]["tier"] == "exact match"
+
+    def test_the_two_collections_are_separate_views_not_one_filtered_set(self) -> None:
+        """Disjoint populations with different denominators, materialised separately."""
+        store = FakePostingStore([a_full_time_role(), an_internship()])
+        assert not set(ids_of(worklist(store))) & set(ids_of(internships(store)))
 
     def test_both_collections_report_both_totals(self) -> None:
         """One read is enough to render "1 full-time · 1 internship" as a heading."""
@@ -940,15 +1492,15 @@ class TestInternshipsCollection:
         assert screening["kept"] is False
         assert [e["gate"] for e in screening["exclusions"]] == ["internship_not_full_time"]
 
-    def test_screening_the_corpus_twice_is_not_how_this_works(self) -> None:
-        """The second pass covers the internship-gated rows, not all 25,294 again."""
+    def test_serving_both_collections_costs_one_summary_read(self) -> None:
+        """Both are views over one pass, so one summary answers both — with a cache."""
         store = FakePostingStore([a_full_time_role(), an_internship()])
-        cache = api.IndexCache(ttl_seconds=300)
+        cache = api.SummaryCache(ttl_seconds=300)
         api.list_worklist(store, event(), resume_text=RESUME, now=NOW, cache=cache)
         api.list_internships(
             store, event(path="/internships"), resume_text=RESUME, now=NOW, cache=cache
         )
-        assert store.reads == 1
+        assert store.summary_reads == 1
 
 
 # ---------------------------------------------------------------------------
@@ -981,6 +1533,20 @@ class TestApplied:
         assert resp["statusCode"] == 404
         assert body_of(resp) == {"error": "posting_not_found"}
         assert store.applied == {}
+
+    def test_a_posting_that_has_since_closed_can_still_be_recorded(self) -> None:
+        """Closing is exactly what happens to a role you applied to.
+
+        The old implementation validated the id against the *open* screened index and
+        documented the 404 as a known limit. A single-posting read closes it, and the
+        store's hydrate deliberately does not filter on ``closed_at``.
+        """
+        posting = make()
+        store = FakePostingStore([posting])
+        store.rescreen()  # a pass in which nothing is open is not the question
+        resp = api.record_applied(store, applied_event(posting.id), now=NOW)
+        assert resp["statusCode"] == 200
+        assert store.applied == {posting.id: NOW}
 
     @pytest.mark.parametrize(
         ("body", "code"),
@@ -1015,7 +1581,7 @@ class TestApplied:
         posting = make()
         store = FakePostingStore([posting])
         api.record_applied(store, applied_event(posting.id), now=NOW)
-        assert store.calls == ["open_postings", "mark_applied"]
+        assert store.calls == ["postings_by_id", "mark_applied"]
 
 
 def test_the_module_cannot_submit_an_application() -> None:
@@ -1068,7 +1634,12 @@ def test_no_jwt_subject_is_401(name: str, handler: Any, raw: dict[str, Any]) -> 
 def test_a_store_that_raises_is_503_not_500(
     name: str, handler: Any, raw: dict[str, Any]
 ) -> None:
-    """A dead store is retryable; a 500 tells the UI nothing and looks like a bug."""
+    """A dead store is retryable; a 500 tells the UI nothing and looks like a bug.
+
+    Distinct from the not-ready states on purpose: ``store_unavailable`` means the
+    store could not be read, ``corpus_not_screened`` means it was read and there is
+    nothing in it yet. A page renders those as different sentences.
+    """
     resp = handler(FakePostingStore([make()], raises=True), raw, now=NOW)
     assert resp["statusCode"] == 503
     assert body_of(resp) == {"error": "store_unavailable"}
@@ -1091,38 +1662,67 @@ def test_rest_authorizer_shape_is_accepted() -> None:
     assert resp["statusCode"] == 200
 
 
-class TestIndexCache:
-    def test_a_warm_container_screens_once(self) -> None:
-        """Screening 25k postings per request makes the UI unusable."""
+class TestSummaryCache:
+    """What is left of the old ``IndexCache``, and why it is only the summary now."""
+
+    def test_a_warm_container_reads_the_summary_once(self) -> None:
         store = FakePostingStore([make()])
-        cache = api.IndexCache(ttl_seconds=300)
+        cache = api.SummaryCache(ttl_seconds=300)
         for _ in range(3):
             api.list_worklist(store, event(), resume_text=RESUME, now=NOW, cache=cache)
-        assert store.reads == 1
+        assert store.summary_reads == 1
+        # The pages themselves are still read per request — a cached page would be a
+        # cached answer to a different question.
+        assert store.calls.count("screened_page") == 3
 
-    def test_the_index_expires(self) -> None:
+    def test_the_summary_expires_so_a_republish_is_picked_up(self) -> None:
         store = FakePostingStore([make()])
-        cache = api.IndexCache(ttl_seconds=60)
+        cache = api.SummaryCache(ttl_seconds=60)
         api.list_worklist(store, event(), resume_text=RESUME, now=NOW, cache=cache)
         api.list_worklist(
             store, event(), resume_text=RESUME, now=NOW + timedelta(seconds=61), cache=cache
         )
-        assert store.reads == 2
+        assert store.summary_reads == 2
 
-    def test_a_backwards_clock_rebuilds_rather_than_pinning_a_stale_index(self) -> None:
-        store = FakePostingStore([make()])
-        cache = api.IndexCache(ttl_seconds=300)
+    def test_a_backwards_clock_re_reads_rather_than_pinning_a_stale_summary(self) -> None:
+        store = FakePostingStore([make()], now=NOW - timedelta(hours=2))
+        cache = api.SummaryCache(ttl_seconds=300)
         api.list_worklist(store, event(), resume_text=RESUME, now=NOW, cache=cache)
         api.list_worklist(
             store, event(), resume_text=RESUME, now=NOW - timedelta(hours=1), cache=cache
         )
-        assert store.reads == 2
+        assert store.summary_reads == 2
 
-    def test_without_a_cache_every_request_is_fresh(self) -> None:
+    def test_an_absent_summary_is_not_cached(self) -> None:
+        """"Not screened yet" is the state that most wants to end promptly.
+
+        Caching it would keep a container answering 503 for the whole TTL after the
+        cron finally published, which is the same "a cached error outlives its cause"
+        argument the public route's ``no-store`` header makes.
+        """
+        store = FakePostingStore([make()], screened=False)
+        cache = api.SummaryCache(ttl_seconds=300)
+        for _ in range(2):
+            resp = api.list_worklist(store, event(), resume_text=RESUME, now=NOW, cache=cache)
+            assert body_of(resp) == {"error": api.NOT_SCREENED}
+        assert store.summary_reads == 2
+        store.rescreen()
+        assert worklist(store)["page"]["count"] == 1
+
+    def test_without_a_cache_every_request_re_reads(self) -> None:
         store = FakePostingStore([make()])
         api.list_worklist(store, event(), resume_text=RESUME, now=NOW)
         api.list_worklist(store, event(), resume_text=RESUME, now=NOW)
-        assert store.reads == 2
+        assert store.summary_reads == 2
+
+    def test_the_old_index_cache_name_is_gone(self) -> None:
+        """``IndexCache`` was kept for one commit as an alias while
+        ``tools/ui/build_ui.py`` still constructed it. That call site now builds a
+        ``SummaryCache``, so the alias is deleted — and asserted deleted, because a
+        compatibility shim nobody removes is how two names for one thing become two
+        things: the next reader who finds ``IndexCache`` would reasonably expect it to
+        cache an index."""
+        assert not hasattr(api, "IndexCache")
 
 
 class TestRouting:
@@ -1181,3 +1781,30 @@ class TestWiring:
         text = api.load_resume_text(Settings(private_dir=tmp_path))
         assert "<p>" not in text
         assert "Python" in text
+
+
+def test_a_real_sqlite_store_serves_the_view_it_was_given(tmp_path: Path) -> None:
+    """One end-to-end pass through a real adapter, because the fake is still a fake.
+
+    Everything above drives an in-memory double. This drives the same read path over
+    ``SqlitePostingStore``: sync the corpus, publish a view built by the cron's
+    builder, then serve a page. It is the smallest test that would fail if the port's
+    two halves — what the writer stores and what the reader queries — disagreed.
+    """
+    store = SqlitePostingStore(tmp_path / "postings.db")
+    postings = [make(title="Junior Software Engineer", day=d, url=f"https://x/{d}")
+                for d in range(1, 6)]
+    postings.append(make(title="Senior Software Engineer", url="https://x/senior"))
+    store.sync(postings, now=NOW)
+    view = build_screening_view(postings, now=NOW)
+    store.save_screening(view.rows, summary=view.summary)
+
+    page = body_of(api.list_worklist(store, event(query={"limit": "2"}), resume_text=RESUME,
+                                     now=NOW))
+    assert page["matched"] == 5
+    assert page["page"]["count"] == 2
+    assert page["funnel"]["gates"]["wrong_seniority_band"] == 1
+    dropped = body_of(api.list_excluded(store, event(path="/excluded"), now=NOW))
+    assert group_for(dropped, "wrong_seniority_band")["items"][0]["quote"] == (
+        "Senior Software Engineer"
+    )

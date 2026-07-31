@@ -4,11 +4,15 @@ name: ci
 # product. It used to bundle the v1 package and point every handler string and every
 # env var at names v2 does not use, and no CI job would have noticed: the trigger was
 # `backend/**` only, so a stack that could not work never ran a single check.
+# `tools/**` is here for the same reason `infra/**` is: the page generator drives the
+# real read handlers end to end and publishes the live site, and it was linted but never
+# *run*. It has since been broken twice by backend changes that every other gate here
+# passed. See the `page` job.
 on:
   push:
-    paths: ["backend/**", "infra/**", ".github/workflows/ci.yml"]
+    paths: ["backend/**", "infra/**", "tools/**", ".github/workflows/ci.yml"]
   pull_request:
-    paths: ["backend/**", "infra/**", ".github/workflows/ci.yml"]
+    paths: ["backend/**", "infra/**", "tools/**", ".github/workflows/ci.yml"]
 
 jobs:
   backend:
@@ -22,7 +26,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install
-        run: pip install -e ".[dev,adapters]"  # adapters extra (boto3/google) — CI tests the adapter layer
+        run: pip install -e ".[dev,adapters,resume]"  # every extra: mypy's answer depends on what is installed
       # `scripts` is included: tailor.py had three strict errors, one of them a
       # `dict[str, object]` of source classes whose `.fetch()` call was unchecked.
       - name: Lint (ruff)
@@ -36,6 +40,81 @@ jobs:
         run: mypy
       - name: Tests (pytest)
         run: pytest
+
+  # The published page, built the way it is really built: a store, the real screening
+  # view, the real read handlers, the real public projection, then the rendered HTML.
+  #
+  # What this catches, precisely, because the honest scope matters: a route that answers
+  # an error instead of a page, a response field the template reads that stopped existing,
+  # a page rendered with nothing in it, a JavaScript syntax error, the two collections
+  # leaking into each other, an internships count that does not reconcile with the
+  # internship gate's, an ATS demo-board posting in a collection, and description prose on
+  # the public wire. Each of those is a broken published site that no other job here sees.
+  #
+  # It does **not** catch the failure that motivated it. The read API screened all 47,538
+  # postings per request — ~72 s against a hard 29 s API Gateway ceiling, so every request
+  # 504'd — and no CI job can reproduce that, because it is invisible at any corpus size a
+  # runner can hold. The guard for *that* is in the test suite: `test_worklist_api` and
+  # `test_public_api` audit every route's store calls and assert none of them reaches
+  # `open_postings`, and walk the module's AST to assert it does not even name it. This job
+  # is the guard for the class of break that happened next — the page generator returning
+  # 503 on every route while pytest, mypy, ruff and cdk synth were all green.
+  #
+  # CI has no corpus (`data/postings.db` is gitignored and 150 MB), so the store is seeded
+  # with ~15 postings picked to make those invariants non-trivial: enough kept roles to
+  # page, one software internship, one posting that fails several gates at once, one with
+  # no description at all, and one on a vendor demo board. See tools/ui/seed_demo_store.py.
+  page:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      # The generator imports the backend package, so it needs the backend's deps —
+      # but not the adapters extra: the seeded store is SQLite and no AWS SDK is loaded.
+      - name: Install
+        run: pip install -e "backend[dev]"
+      - name: Seed a throwaway posting store
+        run: python tools/ui/seed_demo_store.py "$RUNNER_TEMP/ci-postings.db"
+      # --check-js is the other half: a one-file page with a syntax error is a blank
+      # screen with no console anyone sees and no failing test.
+      - name: Build both pages from the real read handlers
+        env:
+          COPILOT_POSTINGS_DB_PATH: ${{ runner.temp }}/ci-postings.db
+        run: |
+          python tools/ui/build_ui.py \
+            --check-js \
+            --local-out "$RUNNER_TEMP/ui.html" \
+            --public-out "$RUNNER_TEMP/index.html"
+      # A page that renders but holds nothing is the shape of the failure this job is
+      # here for: "0 eligible of 0 screened" looks like a working search that found
+      # nothing. So the output is checked for content, not just for existence.
+      - name: The built page is not empty
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, re, sys
+          page = open(os.environ["RUNNER_TEMP"] + "/index.html", encoding="utf-8").read()
+          boot = json.loads(re.search(r"^const BOOT = (\{.*\});$", page, re.M).group(1))
+          snap = boot["snapshot"]
+          fail = []
+          if snap["eligibleTotal"] < 1:
+              fail.append("the page was built with an empty worklist")
+          if snap["itemCount"] != len(snap["items"]):
+              fail.append("itemCount disagrees with the rows it describes")
+          if snap["internshipTotal"] < 1:
+              fail.append("the internships collection is empty, so it proves nothing")
+          if snap["funnel"]["screened"] < snap["eligibleTotal"]:
+              fail.append("more roles are eligible than were screened")
+          if snap["prosePublished"] is not False:
+              fail.append("the public page claims to publish description prose")
+          if fail:
+              sys.exit("\n".join(f"FAIL: {f}" for f in fail))
+          print(f"page holds {snap['itemCount']} of {snap['eligibleTotal']} eligible "
+                f"roles and {snap['internshipTotal']} internships, "
+                f"screened {snap['funnel']['screened']}")
+          PY
 
   infra:
     runs-on: ubuntu-latest
@@ -76,6 +155,27 @@ jobs:
             ! grep -q 'ExportsOutput' "$f" || { echo "$f exports a value"; exit 1; }
             ! grep -q 'Fn::ImportValue' "$f" || { echo "$f imports a value"; exit 1; }
           done
+          # TTL on the posting table is the only thing that removes a stale generation of
+          # the materialised screening view: ~85k rows a day, reaped by `expires_at`
+          # rather than by DeleteItem, because a delete bills like a write. DynamoDB
+          # silently ignores TTL on an attribute no item carries, so a typo is not an
+          # error — it is unbounded growth nothing reports. The attribute name has to
+          # match VIEW_TTL_SECONDS's writer in adapters/dynamodb_posting_store.py.
+          python3 - <<'PY'
+          import json, sys
+          t = json.load(open("cdk.out/career-copilot.template.json"))
+          tables = {k: v["Properties"] for k, v in t["Resources"].items()
+                    if v["Type"] == "AWS::DynamoDB::Table"}
+          postings = [p for p in tables.values()
+                      if any(g["IndexName"] == "open-index"
+                             for g in p.get("GlobalSecondaryIndexes", []))]
+          if len(postings) != 1:
+              sys.exit(f"expected exactly 1 postings table, found {len(postings)}")
+          ttl = postings[0].get("TimeToLiveSpecification")
+          if ttl != {"AttributeName": "expires_at", "Enabled": True}:
+              sys.exit(f"the postings table's TTL is {ttl}, expected expires_at enabled")
+          print("screening-view TTL is enabled on expires_at")
+          PY
           echo "template invariants hold"
       # The stack already guards these at synth time. They are repeated here because
       # the synth guards live in the same file as the routes they check, so one commit

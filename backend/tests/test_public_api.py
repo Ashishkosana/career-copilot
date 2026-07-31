@@ -16,13 +16,18 @@ matter:
   again structurally over the module's own source;
 * an evidence excerpt arriving uncapped because the field carrying it was added to
   the allowlist without being marked as prose;
-* an open endpoint that re-screens 25,294 postings per request, which is a bill.
+* an open endpoint that re-screens 25,294 postings per request — which was not merely
+  a bill, it was a 29-second timeout on every request the live page made. These routes
+  now read a materialised view, and a full sweep is asserted never to touch
+  ``open_postings``;
+* an unscreened corpus answered with a hang rather than a state, so a visitor cannot
+  tell "nothing has been screened yet" from "this service is broken".
 """
 from __future__ import annotations
 
 import ast
 import json
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -30,10 +35,17 @@ from typing import Any
 import pytest
 
 from copilot.domain.posting import Posting
-from copilot.domain.screening import ScreenDecision
 from copilot.handlers import public_api as public
 from copilot.handlers import worklist_api
-from copilot.ports.postingstore import PostingStorePort
+from copilot.handlers.worklist_api import Screened
+from copilot.ports.postingstore import (
+    SCREEN_VIEWS,
+    PostingStorePort,
+    ScreenedPage,
+    ScreenedRow,
+    ScreenSummary,
+)
+from copilot.services.daily_briefing import build_screening_view
 
 NOW = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
 
@@ -77,17 +89,37 @@ class FakePostingStore:
     """In-memory PostingStorePort. ``calls`` is the audit trail the read-only tests read.
 
     Written out in full rather than shared with ``test_worklist_api`` on purpose: the
-    claim under test here is "an open endpoint touches exactly one store method", and
-    that claim is only as good as this fake being a complete ``PostingStorePort`` —
-    every method a public request could possibly reach has to exist to be observed.
+    claim under test here is "an open endpoint touches exactly these store methods and
+    no others", and that claim is only as good as this fake being a *complete*
+    ``PostingStorePort`` — every method a public request could possibly reach has to
+    exist here to be observed not being called.
+
+    The view is published by the cron's own builder, so what these routes project is
+    what the cron actually writes rather than a shape invented in this file.
     """
 
-    def __init__(self, postings: Iterable[Posting] = (), *, raises: bool = False) -> None:
+    def __init__(
+        self,
+        postings: Iterable[Posting] = (),
+        *,
+        raises: bool = False,
+        screened: bool = True,
+        now: datetime = NOW,
+    ) -> None:
         self.postings = list(postings)
-        self.raises = raises
+        self.raises = False
         self.applied: dict[str, datetime] = {}
         self.calls: list[str] = []
-        self.reads = 0
+        self.summary_reads = 0
+        self._views: dict[str, tuple[ScreenedRow, ...]] = {}
+        self._summary: ScreenSummary | None = None
+        if screened:
+            view = build_screening_view(self.postings, now=now)
+            self.save_screening(view.rows, summary=view.summary)
+        # Publishing the view is the cron's work, not a request's, so the audit trail
+        # every test below reads starts empty.
+        self.calls.clear()
+        self.raises = raises
 
     def _note(self, what: str) -> None:
         self.calls.append(what)
@@ -96,12 +128,43 @@ class FakePostingStore:
 
     def open_postings(self) -> list[Posting]:
         self._note("open_postings")
-        self.reads += 1
         return list(self.postings)
+
+    def postings_by_id(self, posting_ids: Sequence[str]) -> dict[str, Posting]:
+        self._note("postings_by_id")
+        wanted = set(posting_ids)
+        return {p.id: p for p in self.postings if p.id in wanted}
 
     def mark_applied(self, posting_id: str, *, now: datetime) -> None:
         self._note("mark_applied")
         self.applied.setdefault(posting_id, now)
+
+    def save_screening(self, rows: Iterable[ScreenedRow], *, summary: ScreenSummary) -> None:
+        self._note("save_screening")
+        self._views[summary.generation] = tuple(rows)
+        self._summary = summary
+
+    def screening_summary(self) -> ScreenSummary | None:
+        self._note("screening_summary")
+        self.summary_reads += 1
+        return self._summary
+
+    def screened_page(
+        self, view: str, *, generation: str, limit: int, after: str | None = None
+    ) -> ScreenedPage:
+        self._note("screened_page")
+        if view not in SCREEN_VIEWS:
+            raise ValueError(f"unknown screening view {view!r}")
+        rows = sorted(
+            (row for row in self._views.get(generation, ()) if row.view == view),
+            key=lambda row: row.sort_key,
+            reverse=True,
+        )
+        if after is not None:
+            rows = [row for row in rows if row.sort_key < after]
+        window = tuple(rows[:limit])
+        next_token = window[-1].sort_key if len(rows) > limit and window else None
+        return ScreenedPage(rows=window, next_token=next_token)
 
     def sync(self, postings: list[Posting], *, now: datetime) -> tuple[list[str], list[str]]:
         self._note("sync")
@@ -329,7 +392,7 @@ class TestPublishedShape:
 # Nothing personal can escape. This section is the guarantee.
 # ---------------------------------------------------------------------------
 
-def spike_card(extra: dict[str, Any]) -> Callable[[ScreenDecision], dict[str, Any]]:
+def spike_card(extra: dict[str, Any]) -> Callable[[Screened], dict[str, Any]]:
     """Wrap the upstream card serialiser so it emits fields it must never publish.
 
     This is how the allowlist is tested as a *property* rather than by reading it: it
@@ -339,8 +402,8 @@ def spike_card(extra: dict[str, Any]) -> Callable[[ScreenDecision], dict[str, An
     """
     original = worklist_api._card
 
-    def spiked(decision: ScreenDecision) -> dict[str, Any]:
-        return {**original(decision), **extra}
+    def spiked(item: Screened) -> dict[str, Any]:
+        return {**original(item), **extra}
 
     return spiked
 
@@ -488,8 +551,8 @@ class TestNothingPersonalEscapes:
         """Fail closed: an outage is recoverable, a page of empty columns is not noticed."""
         original = worklist_api._card
 
-        def renamed(decision: ScreenDecision) -> dict[str, Any]:
-            card = original(decision)
+        def renamed(item: Screened) -> dict[str, Any]:
+            card = original(item)
             card["jobTitle"] = card.pop("title")
             return card
 
@@ -616,14 +679,22 @@ class TestNothingPersonalEscapes:
 # ---------------------------------------------------------------------------
 
 class TestReadOnly:
-    def test_a_full_sweep_touches_only_open_postings(self) -> None:
-        """Every public route, one store: nothing but reads may be observed."""
+    def test_a_full_sweep_reads_the_view_and_never_the_whole_corpus(self) -> None:
+        """Every public route, one store: three reads, and ``open_postings`` is not one.
+
+        Not a purity check. Reading the whole corpus per request is what made every one
+        of these four routes answer ``Status: timeout`` at 29,000 ms on the live API,
+        six times in a row, including ``?limit=1``. The assertion is here so that a
+        future edit reaching for ``open_postings`` — for a count, for a facet, for
+        anything — fails in this file rather than on the published page.
+        """
         posting = make()
         store = FakePostingStore([posting, an_internship()])
         for path in ALL_PATHS:
             get(store, path=path)
         detail(store, posting)
-        assert set(store.calls) == {"open_postings"}
+        assert "open_postings" not in store.calls
+        assert set(store.calls) == {"screening_summary", "screened_page", "postings_by_id"}
         assert store.applied == {}
 
     @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
@@ -904,15 +975,15 @@ class TestRoutingAndCost:
         assert resp["statusCode"] == 503
         assert resp["headers"]["Cache-Control"] == "no-store"
 
-    def test_the_cache_header_never_outlives_the_index(self) -> None:
-        """Promising fresher data than the index can hold would be a lie in a header."""
-        assert public.CACHE_MAX_AGE_SECONDS <= worklist_api.INDEX_TTL_SECONDS
+    def test_the_cache_header_never_outlives_the_summary_it_was_served_from(self) -> None:
+        """Promising fresher data than a warm container can hold would be a lie in a header."""
+        assert public.CACHE_MAX_AGE_SECONDS <= worklist_api.SUMMARY_TTL_SECONDS
 
-    def test_a_warm_container_screens_once_across_all_four_routes(self) -> None:
-        """25,294 postings re-screened per request is the bill this prevents."""
+    def test_a_warm_container_reads_one_summary_across_all_four_routes(self) -> None:
+        """The 25,294-posting screen per request is gone; one summary item is what is left."""
         posting = make()
         store = FakePostingStore([posting, an_internship()])
-        cache = worklist_api.IndexCache(ttl_seconds=300)
+        cache = worklist_api.SummaryCache(ttl_seconds=300)
         for path in ALL_PATHS:
             public.route(store, request(path=path), resume_text=RESUME, now=NOW, cache=cache)
         public.route(
@@ -922,16 +993,16 @@ class TestRoutingAndCost:
             now=NOW,
             cache=cache,
         )
-        assert store.reads == 1
+        assert store.summary_reads == 1
 
-    def test_the_index_still_expires(self) -> None:
+    def test_the_summary_still_expires(self) -> None:
         store = FakePostingStore([make()])
-        cache = worklist_api.IndexCache(ttl_seconds=60)
+        cache = worklist_api.SummaryCache(ttl_seconds=60)
         public.route(store, request(), resume_text=RESUME, now=NOW, cache=cache)
         public.route(
             store, request(), resume_text=RESUME, now=NOW + timedelta(seconds=61), cache=cache
         )
-        assert store.reads == 2
+        assert store.summary_reads == 2
 
     def test_a_page_is_capped_so_one_request_cannot_pull_the_corpus(self) -> None:
         store = FakePostingStore(make(day=d, url=f"https://x/{d}") for d in range(1, 29))
@@ -943,3 +1014,64 @@ class TestRoutingAndCost:
             now=NOW,
         )
         assert resp["statusCode"] == 400
+
+
+# ---------------------------------------------------------------------------
+# "Not screened yet" on an open route
+# ---------------------------------------------------------------------------
+
+class TestNotReadyOnTheOpenRoute:
+    """A visitor must be able to tell "nothing yet" from "we are broken".
+
+    Before this, both were the same thing: a 29-second hang. The live API answered
+    ``Status: timeout`` at 29,000 ms six times in a row, and nothing on the page could
+    distinguish that from an outage — or from a corpus that had genuinely never been
+    screened.
+    """
+
+    @pytest.mark.parametrize("path", ALL_PATHS)
+    def test_an_unscreened_corpus_is_a_named_state(self, path: str) -> None:
+        store = FakePostingStore([make()], screened=False)
+        resp = public.route(store, request(path=path), resume_text=RESUME, now=NOW)
+        assert resp["statusCode"] == 503
+        assert body_of(resp) == {"error": worklist_api.NOT_SCREENED}
+        # The state survives the projection because it *is* the error code: an error
+        # body here is ``{"error": code}`` and nothing else, so carrying it in a field
+        # beside the code would have needed a new allowlist entry.
+        assert "open_postings" not in store.calls
+
+    def test_a_stale_view_is_its_own_state(self) -> None:
+        """Two missed cron runs is a different sentence from "never screened"."""
+        store = FakePostingStore([make()], now=NOW - timedelta(hours=60))
+        resp = public.route(store, request(), resume_text=RESUME, now=NOW)
+        assert resp["statusCode"] == 503
+        assert body_of(resp) == {"error": worklist_api.VIEW_STALE}
+
+    def test_not_ready_is_never_cached(self) -> None:
+        """A cached "not screened yet" outlives the cron run that fixes it."""
+        store = FakePostingStore([make()], screened=False)
+        resp = public.route(store, request(), resume_text=RESUME, now=NOW)
+        assert resp["headers"]["Cache-Control"] == "no-store"
+
+    def test_the_three_unhappy_states_are_three_different_codes(self) -> None:
+        """Same status, different sentences — the page renders each one differently."""
+        codes = set()
+        for store in (
+            FakePostingStore([make()], screened=False),
+            FakePostingStore([make()], now=NOW - timedelta(hours=60)),
+            FakePostingStore([make()], raises=True),
+        ):
+            resp = public.route(store, request(), resume_text=RESUME, now=NOW)
+            assert resp["statusCode"] == 503
+            codes.add(body_of(resp)["error"])
+        assert codes == {
+            worklist_api.NOT_SCREENED, worklist_api.VIEW_STALE, "store_unavailable"
+        }
+
+    def test_a_detail_read_still_answers_while_the_corpus_is_unscreened(self) -> None:
+        """It re-screens one posting, so the trust surface's click-through keeps working."""
+        posting = make()
+        store = FakePostingStore([posting], screened=False)
+        found = detail(store, posting)["posting"]
+        assert found["screening"]["kept"] is True
+        assert "description" not in found

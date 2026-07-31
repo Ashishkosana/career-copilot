@@ -20,12 +20,23 @@ adapters = [
   "google-api-python-client>=2.130",
   "google-auth>=2.30",
   "google-auth-oauthlib>=1.2",
-  "google-genai>=1.0",
+]
+# scripts/tailor.py verifies a built PDF's text layer. Local-only tooling — Lambda has
+# no browser — but declared so the type gate sees the same imports everywhere. Left out,
+# CI could not resolve them and mypy failed on a PR that passed locally.
+resume = [
+  "pdfplumber>=0.11",
+  "pypdf>=6.0",
 ]
 dev = [
   "pytest>=8.2",
-  "ruff>=0.5",
-  "mypy>=1.10",
+  # Pinned exactly, not `>=`. CI installs from this file and ran a *newer* ruff
+  # than the local venv, so `ruff check` passed locally and failed on the PR with
+  # RUF036 — a rule the local build did not have. A lint gate that disagrees with
+  # itself across machines is not a gate; it is a coin flip you notice in review.
+  # Bump these deliberately and fix the fallout in that commit.
+  "ruff==0.16.1",
+  "mypy==2.3.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -74,10 +85,26 @@ module = [
   "googleapiclient.*",
   "google.*",
   "google_auth_oauthlib.*",
+  "pdfplumber.*",
+  "pypdf.*",
 ]
 ignore_missing_imports = true
+# Note what this does *not* cover, because it cost a red PR. `ignore_missing_imports`
+# only applies when the import is **missing**. Without google-auth installed, the name
+# resolves to `Any` and calling it is fine; *with* google-auth installed — it ships no
+# `py.typed` — the import succeeds as untyped and strict mode's `disallow_untyped_calls`
+# fires at the call site. Same source, same mypy, same config, different answer purely
+# because CI installs the `adapters` extra and the local venv had not: the local gate was
+# weaker for having *fewer* packages, which is the opposite of the intuition.
+#
+# The fix is at the call site, not here. mypy's per-module options apply to the module
+# being **checked**, so `disallow_untyped_calls = false` in this block would govern
+# google's own files, not our calls into them. See gmail_mailbox.py:202.
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+# `scripts` is importable so the batch route can be tested rather than only run.
+# It is the one script carrying real logic — it decides what a model is asked and
+# whether its answer is trustworthy — and that belongs under test, not under review.
+pythonpath = ["src", "scripts"]
 testpaths = ["tests"]
 addopts = "-q"

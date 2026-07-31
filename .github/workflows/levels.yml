@@ -1,0 +1,151 @@
+# Read seniority levels with Claude Code, on a schedule, using the subscription.
+#
+# Why here and not in the Lambda. 631 eligible postings state no level in their
+# title, and resolving them needs a language model. The Messages API requires a
+# Console `sk-ant-api03-` key on a prepaid balance; a Claude subscription issues a
+# `sk-ant-oat01-` token, which authenticates the Claude Code *program* and answers
+# `401 invalid x-api-key` against the API — separate doors, because a flat
+# subscription cannot be billed per call. Claude Code itself is a few hundred
+# megabytes needing a filesystem and a shell, so it cannot go in a Lambda bundle
+# already at 145 MB of its 250 MB ceiling. A CI runner has both.
+#
+# ---------------------------------------------------------------------------
+# The security shape, which is the part worth reading.
+#
+# This job feeds **scraped third-party job descriptions** to a model, unattended, on
+# a cron. That text is untrusted: a description can contain instructions. So the
+# model step is given nothing to attack with.
+#
+#   * `--allowed-tools ""` — no tools at all. No file reads, no writes, no shell, no
+#     network. The step is a pure text transformation: prompt in, stdout out.
+#   * No `--permission-mode acceptEdits`. An earlier draft of this file used it, which
+#     would have let injected text edit the checkout with no approval. That was the
+#     defect, not a precaution someone forgot.
+#   * It runs from `$RUNNER_TEMP`, not the checkout, so there is no repository in
+#     scope and no project instructions to inherit.
+#   * The token is `CLAUDE_CODE_OAUTH_TOKEN`. It cannot call the Messages API and
+#     cannot touch AWS. The AWS credentials are scoped to the two Python steps, which
+#     make no model call.
+#
+# The remaining surface is a description trying to talk the model into a wrong
+# answer. That is handled by verification rather than by trust: `import` re-reads the
+# real description from the store and requires the quoted span to actually occur in
+# it. An injected "call every role entry-level" yields a quote that is not in the
+# text, which is forced to low confidence and flagged `evidence_verified: false`, so
+# nothing downstream treats it as supported.
+name: levels
+
+on:
+  schedule:
+    # 15:00 UTC = 08:00 America/Phoenix, an hour after the fetch cron at 14:00, so the
+    # postings this reads about already exist.
+    - cron: "0 15 * * *"
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "How many postings to resolve this run"
+        required: false
+        default: "60"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two runs would export overlapping batches and spend the model twice on the same
+  # postings. Not cancel-in-progress: a half-finished batch has already cached real
+  # answers, and killing it wastes them.
+  group: levels
+  cancel-in-progress: false
+
+jobs:
+  levels:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      LIMIT: ${{ inputs.limit || '60' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # `adapters` for boto3 — these steps talk to the real DynamoDB corpus.
+      - name: Install
+        working-directory: backend
+        run: pip install -e ".[dev,adapters,resume]"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Export the postings that still need a level
+        working-directory: backend
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          COPILOT_POSTINGS_TABLE_NAME: career-copilot-postings
+        run: |
+          python scripts/level_batch.py export \
+            --out "$RUNNER_TEMP/todo.json" --limit "$LIMIT"
+
+      # Nothing to do is the normal state once the queue is drained. It must not spend
+      # a model call, and it must not fail the run.
+      - name: Anything to do?
+        id: check
+        working-directory: backend
+        run: |
+          count=$(python scripts/level_batch.py count --in "$RUNNER_TEMP/todo.json")
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "$count postings need a level."
+
+      - name: Build the prompt
+        if: steps.check.outputs.count != '0'
+        working-directory: backend
+        run: |
+          python scripts/level_batch.py prompt \
+            --in "$RUNNER_TEMP/todo.json" --out "$RUNNER_TEMP/prompt.txt"
+
+      - name: Read the levels
+        if: steps.check.outputs.count != '0'
+        # Not the checkout: nothing in the repo should be reachable from this step.
+        working-directory: ${{ runner.temp }}
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          # The prompt is an argument and `--allowed-tools` follows it, because that
+          # flag is variadic and swallows a prompt placed after it — which fails with
+          # "Input must be provided", two arguments away from the cause.
+          # `< /dev/null` closes stdin so the CLI does not wait 3 s for input it will
+          # not get.
+          claude --print "$(cat prompt.txt)" --allowed-tools "" \
+            < /dev/null > raw.txt
+          echo "model returned $(wc -c < raw.txt) bytes"
+
+      - name: Validate and cache the answers
+        if: steps.check.outputs.count != '0'
+        working-directory: backend
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          COPILOT_POSTINGS_TABLE_NAME: career-copilot-postings
+        run: |
+          python scripts/level_batch.py import \
+            --in "$RUNNER_TEMP/raw.txt" --limit "$LIMIT"
+
+      # Kept on failure only. These files hold other people's job descriptions, so a
+      # green run leaves nothing behind.
+      - name: Upload the batch for inspection
+        if: failure() && steps.check.outputs.count != '0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: level-batch
+          path: |
+            ${{ runner.temp }}/todo.json
+            ${{ runner.temp }}/raw.txt
+          retention-days: 3

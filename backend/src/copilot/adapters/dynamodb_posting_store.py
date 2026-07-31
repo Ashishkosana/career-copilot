@@ -59,22 +59,99 @@ partition — it is written only when a human applies, so it cannot get hot.
 Both "is it open" indexes are **sparse**: closing a posting removes ``open_pk``/
 ``open_sk`` instead of setting a flag, so "still open" costs nothing to filter —
 the closed rows are simply not in the index.
+
+The materialised screening view — and why it needs **no fifth index**
+---------------------------------------------------------------------
+
+The read path needs four access patterns (see :mod:`copilot.ports.postingstore`):
+a recency page of the kept set, a recency page of the internships set, a per-gate
+page of the excluded set, and the summary. None of the four indexes above can
+serve them: they are all keyed on ``first_seen`` or on presence, and none knows a
+screening verdict.
+
+A fifth GSI would be the obvious move and is the wrong one. A GSI gives exactly
+**one** entry per item, and a posting belongs to several views at once — it fails
+the seniority gate *and* the citizenship gate — so one index over the posting
+items cannot express the membership at all. The view is therefore stored as its
+own item collection in the **base table**, which also means these 44k daily writes
+carry no index write amplification::
+
+    pk                                     sk           holds
+    SCREENVIEW#<gen>#<view>#<shard>        <sort_key>   one (posting, view) row
+    SCREEN#SUMMARY                         CURRENT      the published funnel
+
+``<sort_key>`` is ``<posted_at>#<id>``, so a recency page is a plain descending
+range query. ``<gen>`` is in the partition key, which is what makes publishing
+atomic: a new pass writes into partitions nothing reads until the summary names
+that generation. There are no deletes and no diffing — a posting that moves from
+"excluded" to "kept" simply does not exist in the new generation's old view.
+
+``<shard>`` is the leading hex digit of the posting id, for the same reason the
+posting items are sharded and with a sharper edge here: the ``not_a_software_role``
+view holds 87% of the corpus (22,074 of 25,294 measured locally, so ~41,500 of the
+deployed 47,538), and a single partition key accepts at most 1,000 WCU/s no matter
+how much on-demand capacity the table has — DynamoDB splits a hot partition by key
+*range*, never a single key. Unsharded, that one view would spend ~42 s of wall
+clock on its own. 16 shards bring it under 3 s, and cost the reader a fixed
+16-query scatter-gather per page (a page of 25 reads ≤ 416 rows and returns 25).
+
+**Stale generations are reaped by TTL, not by DeleteItem.** Deletes cost the same
+as writes, and ~85k of them a day is real money to remove rows no reader can name.
+Every row carries ``expires_at`` (epoch seconds), and the table must have TTL
+enabled on that attribute. If it is not enabled nothing breaks — old generations
+are unreadable either way — it just accrues ~36 MB of storage per stale day, which
+is under a cent a month.
+
+**What a run costs, measured.** Screening the real 25,294-posting corpus produces
+45,158 rows (1.79 per posting) whose items are **424 bytes on the mean, 679 at the
+maximum** — so every row is comfortably inside the 1 KB WCU boundary and bills as
+exactly 1 WCU. Extrapolated to the deployed 47,538: ~84,900 rows, ~84,900 WCU,
+**$0.106 per run** on-demand at $1.25/million. That is the dominant *new* cost in
+this system, and it sits alongside the corpus sync's own measured ~286,000 WCU
+(items average 5,643 bytes, so ~6 WCU each; $0.358/run) — so the view adds ~30% to
+the daily write bill and removes an endpoint that was failing 100% of requests.
+
+The rows deliberately do not carry ``description``. It is the bulk of a posting
+item — mean 5.6 KB, 25 KB worst case, 268 MB across the deployed corpus — so
+copying it here would take each row from 1 WCU to ~6 and multiply that by the 1.79
+views a posting sits in, for data the page hydrates from the posting item anyway.
 """
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 from copilot.domain.posting import Posting
 from copilot.logging import get_logger
+from copilot.ports.postingstore import (
+    SCREEN_VIEWS,
+    ScreenedPage,
+    ScreenedRow,
+    ScreenSummary,
+    posted_at_from_sort_key,
+    summary_from_payload,
+    summary_to_payload,
+)
 
 _LOG = get_logger("copilot.adapters.dynamodb_posting_store")
 
 _SK = "META"
 #: 16 shards, one per leading hex digit of the (sha1) posting id.
 _SHARDS = tuple("0123456789abcdef")
+
+#: Partition key of the single published summary. A fixed key so reading it is one
+#: GetItem — the cheapest possible "is there a view, and which one".
+_SUMMARY_PK = "SCREEN#SUMMARY"
+_SUMMARY_SK = "CURRENT"
+_VIEW_PK_PREFIX = "SCREENVIEW"
+
+#: How long a screening row survives its generation. Three days, so two failed
+#: crons in a row still leave the last good view readable, and long enough that
+#: DynamoDB's TTL sweep (best-effort, typically within 48 h) is never the thing
+#: that removes a *current* row.
+VIEW_TTL_SECONDS = 3 * 24 * 3600
 
 OPEN_INDEX = "open-index"
 SEEN_INDEX = "seen-index"
@@ -162,6 +239,52 @@ def item_size_bytes(item: Mapping[str, Any]) -> int:
     return sum(len(name.encode()) + _value_size(value) for name, value in item.items())
 
 
+def _epoch_seconds(value: datetime) -> int:
+    """Epoch seconds, reading a naive input as UTC.
+
+    TTL is the one field where a wrong timezone is silently destructive: a naive
+    stamp read as local time can put ``expires_at`` hours off, and DynamoDB will not
+    complain about either an early reap or a row that outlives its generation.
+    """
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return int(aware.timestamp())
+
+
+def _shard_of(posting_id: str) -> str:
+    """Which of the 16 write shards a posting belongs to.
+
+    The leading hex digit of a sha1 id, so the shards are uniform by construction —
+    no registry, no dependence on the wall clock, and identical for the posting
+    items and their screening rows.
+    """
+    return posting_id[0] if posting_id else "0"
+
+
+def _to_screened_row(item: Mapping[str, Any]) -> ScreenedRow:
+    """Rebuild a :class:`ScreenedRow` from a stored item.
+
+    ``posted_at`` is read back out of the **sort key** rather than stored twice.
+    The key already has to hold it byte-comparably, and a second copy is a second
+    thing to disagree with the ordering the reader is paging on — see
+    :func:`~copilot.ports.postingstore.posted_at_from_sort_key`, which the SQLite
+    adapter uses for exactly the same reason.
+    """
+    return ScreenedRow(
+        posting_id=str(item["posting_id"]),
+        view=str(item["view"]),
+        posted_at=posted_at_from_sort_key(str(item["sk"])),
+        kept=bool(item["kept"]),
+        level=str(item["level"]),
+        level_source=str(item["level_source"]),
+        level_why=str(item.get("level_why", "")),
+        eligibility_checked=bool(item["eligibility_checked"]),
+        sponsorship=str(item["sponsorship"]),
+        gate=str(item.get("gate", "")),
+        reason=str(item.get("reason", "")),
+        quote=str(item.get("quote", "")),
+    )
+
+
 def _to_posting(item: Mapping[str, Any]) -> Posting:
     """Rebuild a :class:`Posting` from a stored item.
 
@@ -236,7 +359,7 @@ class DynamoDbPostingStore:
     # --- item mapping ---------------------------------------------------------
 
     def _item(self, posting: Posting, *, first_seen: str, last_seen: str) -> dict[str, Any]:
-        shard = posting.id[0]
+        shard = _shard_of(posting.id)
         item: dict[str, Any] = {
             "pk": f"POSTING#{posting.id}",
             "sk": _SK,
@@ -300,7 +423,7 @@ class DynamoDbPostingStore:
 
     @staticmethod
     def _shard_query(
-        index: str,
+        index: str | None,
         pk_attr: str,
         pk_value: str,
         *,
@@ -309,11 +432,14 @@ class DynamoDbPostingStore:
         sk_value: str | None = None,
         scan_forward: bool = True,
     ) -> dict[str, Any]:
-        """Build query kwargs.
+        """Build query kwargs. ``index=None`` queries the base table.
 
         Every attribute is referenced through an ``#alias``: DynamoDB's reserved
         word list is long and undocumented at the call site, and a name collision
         surfaces as a ValidationException at runtime, in production, once.
+        ``pk``/``sk`` are aliased for the same reason even though they are not
+        reserved words — one code path, so the screening view cannot be the one
+        query that forgot.
         """
         names = {"#pk": pk_attr}
         values: dict[str, Any] = {":pk": pk_value}
@@ -323,11 +449,12 @@ class DynamoDbPostingStore:
             values[":sk"] = sk_value
             expression += f" AND {sk_condition}"
         kwargs: dict[str, Any] = {
-            "IndexName": index,
             "KeyConditionExpression": expression,
             "ExpressionAttributeNames": names,
             "ExpressionAttributeValues": values,
         }
+        if index is not None:
+            kwargs["IndexName"] = index
         if not scan_forward:
             kwargs["ScanIndexForward"] = False
         return kwargs
@@ -427,7 +554,7 @@ class DynamoDbPostingStore:
             ":last_seen": now,
             ":title": posting.title,
             ":location": posting.location,
-            ":open_pk": f"OPEN#{posting.id[0]}",
+            ":open_pk": f"OPEN#{_shard_of(posting.id)}",
             ":open_sk": f"{first_seen}#{posting.id}",
             ":seen_sk": f"OPEN#{first_seen}#{posting.id}",
         }
@@ -552,7 +679,7 @@ class DynamoDbPostingStore:
             },
             values={
                 ":payload": json.dumps(payload, sort_keys=True),
-                ":cache_pk": f"CACHE#{posting_id[0]}",
+                ":cache_pk": f"CACHE#{_shard_of(posting_id)}",
                 ":cache_sk": posting_id,
             },
             condition="attribute_exists(#pk)",
@@ -582,6 +709,164 @@ class DynamoDbPostingStore:
             },
             condition="attribute_exists(#pk) AND attribute_not_exists(#applied_at)",
         )
+
+    # --- the materialised screening view --------------------------------------
+
+    def save_screening(self, rows: Iterable[ScreenedRow], *, summary: ScreenSummary) -> None:
+        """Write every row under the new generation, then publish the summary.
+
+        The order is the whole guarantee. Rows live under
+        ``SCREENVIEW#<generation>#…`` partitions, so until the summary names that
+        generation no reader can address them; the final ``put_item`` is the atomic
+        swap. A pass that dies part-way therefore leaves orphan rows that TTL will
+        reap and the *previous* complete view still current — never a half-written
+        view that reads as authoritative. The first live cron crashed after the
+        corpus landed and before the run finished, which is exactly this shape.
+
+        ``overwrite_by_pkeys`` is not an optimisation: two postings in one fetch can
+        share a URL (a company re-lists a requisition), so they share an id, a
+        sort key and therefore an item key — and duplicate keys inside one
+        BatchWriteItem request are a ValidationException that fails the whole run.
+
+        Nothing reports success before the ``with`` block exits: partial throttling
+        comes back as ``UnprocessedItems`` on an HTTP 200 and BatchWriter re-queues
+        it, so leaving the block is what drains the buffer.
+        """
+        expires_at = _epoch_seconds(summary.screened_at) + VIEW_TTL_SECONDS
+        written = 0
+        with self.table.batch_writer(overwrite_by_pkeys=["pk", "sk"]) as batch:
+            for row in rows:
+                batch.put_item(
+                    Item=self._row_item(row, generation=summary.generation, expires=expires_at)
+                )
+                written += 1
+        self.table.put_item(
+            Item={
+                "pk": _SUMMARY_PK,
+                "sk": _SUMMARY_SK,
+                "generation": summary.generation,
+                "screened_at": _stamp(summary.screened_at),
+                # One JSON string rather than 11 attributes, byte-identical to what
+                # SQLite stores. Same reasoning as the interpretation cache: the two
+                # stores round-trip the summary the same way, and a JSON string
+                # cannot hand a reader a Decimal where it wrote an int.
+                "summary": json.dumps(summary_to_payload(summary), sort_keys=True),
+            }
+        )
+        _LOG.info(
+            "screening_view_published",
+            extra={"extra_fields": {
+                "generation": summary.generation,
+                "rows": written,
+                "kept": summary.kept,
+                "screened": summary.screened,
+            }},
+        )
+
+    def _row_item(self, row: ScreenedRow, *, generation: str, expires: int) -> dict[str, Any]:
+        return {
+            "pk": f"{_VIEW_PK_PREFIX}#{generation}#{row.view}#{_shard_of(row.posting_id)}",
+            "sk": row.sort_key,
+            "posting_id": row.posting_id,
+            "view": row.view,
+            "kept": row.kept,
+            "level": row.level,
+            "level_source": row.level_source,
+            "level_why": row.level_why,
+            "eligibility_checked": row.eligibility_checked,
+            "sponsorship": row.sponsorship,
+            "gate": row.gate,
+            "reason": row.reason,
+            "quote": row.quote,
+            # Epoch seconds, which is the only format DynamoDB TTL reads. An ISO
+            # string here would be silently ignored and the rows would live forever.
+            "expires_at": expires,
+        }
+
+    def screening_summary(self) -> ScreenSummary | None:
+        """The published funnel, or ``None``. One GetItem, ~5 ms, always.
+
+        A missing item, an unreadable payload and a payload from an older
+        ``VIEW_VERSION`` all answer ``None``: a reader's only two honest answers are
+        "here is the view" and "the corpus has not been screened yet". Raising here
+        would turn a stale deploy into a 500 on the public page, which is as opaque
+        as the 504 this replaced.
+        """
+        response = self.table.get_item(Key={"pk": _SUMMARY_PK, "sk": _SUMMARY_SK})
+        raw = response.get("Item", {}).get("summary")
+        if raw is None:
+            return None
+        try:
+            payload = json.loads(str(raw))
+        except ValueError:
+            _LOG.warning("screening_summary_unparsable")
+            return None
+        if not isinstance(payload, Mapping):
+            return None
+        return summary_from_payload(payload)
+
+    def screened_page(
+        self, view: str, *, generation: str, limit: int, after: str | None = None
+    ) -> ScreenedPage:
+        """One recency page of one view: 16 shard queries, merged, top ``limit``.
+
+        Each shard is asked for ``limit + 1`` rows below the cursor, so the merged
+        pool holds more than ``limit`` rows exactly when a next page exists. That
+        equivalence is why ``hasMore`` needs no COUNT query — and a count taken
+        separately could describe a different generation than the page beside it.
+
+        Asking each shard for the page size is what keeps this O(page): the
+        ``not_a_software_role`` view holds ~41,500 rows and a page of 25 reads at
+        most 416 of them, measured at 16 queries flat regardless of view size.
+        """
+        if view not in SCREEN_VIEWS:
+            raise ValueError(f"unknown screening view {view!r}")
+        pool: list[dict[str, Any]] = []
+        for shard in _SHARDS:
+            kwargs = self._shard_query(
+                None,
+                "pk",
+                f"{_VIEW_PK_PREFIX}#{generation}#{view}#{shard}",
+                sk_attr="sk" if after is not None else None,
+                sk_condition="#sk < :sk" if after is not None else None,
+                sk_value=after,
+                scan_forward=False,
+            )
+            pool.extend(self._limited_pages(want=limit + 1, **kwargs))
+        pool.sort(key=lambda item: str(item["sk"]), reverse=True)
+        rows = tuple(_to_screened_row(item) for item in pool[:limit])
+        next_token = rows[-1].sort_key if len(pool) > limit and rows else None
+        return ScreenedPage(rows=rows, next_token=next_token)
+
+    def _limited_pages(self, *, want: int, **kwargs: Any) -> list[dict[str, Any]]:
+        """Query until ``want`` items are in hand, then stop.
+
+        The other query helper in this module pages to exhaustion, because
+        truncating it would silently lose postings. This one must *not*: the
+        ``not_a_software_role`` view holds ~41,500 rows and paging it to serve a page
+        of 25 is the cost this whole change removes.
+
+        ``Limit`` alone would be the obvious implementation and would be subtly
+        wrong. DynamoDB cuts a query at 1 MB **before** applying ``Limit``, so a
+        single query is only guaranteed to return ``Limit`` items while the rows stay
+        small. They are 424 bytes on the mean and 679 at the measured maximum, so one
+        query always suffices today — but a future field that pushed a row to 40 KB
+        would silently start under-filling pages, and a short page reads as "that is
+        all there is". Looping until the count is met costs nothing when one page
+        suffices and stays correct when it does not.
+        """
+        kwargs["Limit"] = want
+        items: list[dict[str, Any]] = []
+        start_key: dict[str, Any] | None = None
+        while len(items) < want:
+            if start_key is not None:
+                kwargs["ExclusiveStartKey"] = start_key
+            response = self.table.query(**kwargs)
+            items.extend(response.get("Items", []))
+            start_key = response.get("LastEvaluatedKey")
+            if not start_key:
+                break
+        return items[:want]
 
     def _update_or_ignore_missing(
         self,
@@ -692,6 +977,29 @@ class DynamoDbPostingStore:
         ]
         items.sort(key=lambda i: str(i.get("posted_at") or ""), reverse=True)
         return [_to_posting(i) for i in items]
+
+    def postings_by_id(self, posting_ids: Sequence[str]) -> dict[str, Posting]:
+        """Hydrate one page of postings by primary key. Unknown ids are absent.
+
+        A GetItem per id rather than BatchGetItem, deliberately. BatchGetItem lives
+        on the *service resource*, not on a Table, so reaching it would mean holding
+        a second boto3 object purely to save round trips on a call whose input is
+        capped at the API's ``MAX_LIMIT`` of 100 — and the in-memory double that
+        proves both stores behave alike would have to grow a second write path. At
+        ~5 ms each a default page of 25 is ~125 ms; the thing this replaced was 70 s
+        of screening, so the round trips are not where the budget goes.
+
+        Closed postings are returned on purpose: ``/excluded`` and ``POST /applied``
+        both address postings the worklist no longer lists, and filtering them here
+        would turn "this role closed" into "no such posting".
+        """
+        found: dict[str, Posting] = {}
+        for posting_id in dict.fromkeys(posting_ids):  # de-duped, order preserved
+            response = self.table.get_item(Key={"pk": f"POSTING#{posting_id}", "sk": _SK})
+            item = response.get("Item")
+            if item:
+                found[posting_id] = _to_posting(item)
+        return found
 
     def cached_interpretation(self, posting_id: str) -> dict[str, Any] | None:
         """A previously stored LLM result, or ``None``. The main cost lever."""

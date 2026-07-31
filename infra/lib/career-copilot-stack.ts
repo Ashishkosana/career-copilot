@@ -275,6 +275,21 @@ export class CareerCopilotStack extends cdk.Stack {
       // re-fetch does not. `applied_at` is the one irreplaceable attribute here;
       // if that ever grows past a handful of rows, turn PITR on for it.
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: false },
+      // How the materialised screening view is garbage-collected. Every row the
+      // daily screen writes carries `expires_at` (epoch seconds, three days out);
+      // see VIEW_TTL_SECONDS in adapters/dynamodb_posting_store.py. TTL rather
+      // than DeleteItem because a delete bills like a write, and ~85k of them a
+      // day to remove rows no reader can address is real money for nothing.
+      //
+      // The attribute name has to match the adapter exactly: DynamoDB silently
+      // ignores TTL on an attribute no item has, so a typo here is not an error,
+      // it is unbounded growth (~36 MB per stale generation) that nothing reports.
+      //
+      // Safe for the corpus itself: TTL only ever deletes an item that *has* the
+      // attribute with a past timestamp, and posting items never carry it. That
+      // asymmetry is why the rows are the only thing with an expiry — a corpus item
+      // must outlive every generation of the view built over it.
+      timeToLiveAttribute: "expires_at",
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 

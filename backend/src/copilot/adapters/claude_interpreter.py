@@ -23,12 +23,21 @@ function the rule tier uses. Both checks are free and both catch real drift.
 a feed for weeks; at ~1,370 input tokens each, re-reading 880 descriptions daily
 would cost more than the model choice ever could.
 
-Measured cost, on ~1,370 input and ~120 output tokens per posting at
-``claude-haiku-4-5`` list price ($1.00 / $5.00 per MTok):
+Cost, on ~1,370 input and ~120 output tokens per posting at ``claude-opus-5``
+list price ($5.00 / $25.00 per MTok):
 
-* **$1.97 per 1,000 postings** — $1.37 input + $0.60 output.
-* The 652-posting backfill: **~$1.28**, once.
-* Steady state is ~2 new postings a day: **~$0.004/day**, ~$1.44/year.
+* **$9.85 per 1,000 postings** — $6.85 input + $3.00 output.
+* The 631-posting backfill: **~$6.22**, once.
+* Steady state is the day's genuinely new postings, which the live corpus puts at
+  ~358: **~$3.53/day** if every one lacks a title marker, and in practice a
+  fraction of that, since most new postings state a level and never reach here.
+
+That is **5x what ``claude-haiku-4-5`` cost** for the same work ($1.97/1,000), and
+the choice is deliberate rather than accidental: this is a classification with a
+fixed output schema, which is the shape a small model handles well. Opus is used
+because it was asked for, and the knob is the ``model`` argument — one string —
+if the bill argues otherwise. The per-posting cache is what keeps either number
+bounded: a posting is interpreted once, ever, not once per run.
 
 Batching is deliberately *not* used. The Batch API halves the price but allows up
 to 24 hours of latency, and at two postings a day it would save $0.002/day while
@@ -36,7 +45,7 @@ making a daily briefing arrive a day late. It is worth exactly one thing — the
 one-time backfill, where $1.28 becomes $0.64 — which does not justify a second
 code path. Prompt caching is likewise skipped and cannot help here: the shared
 prefix is the ~280-token system prompt, and the whole request is ~1,370 tokens —
-both under this model tier's 4,096-token minimum cacheable prefix. The bulk of
+both under the 1,024-token minimum cacheable prefix this tier applies. The bulk of
 every request is the description, which differs per posting by definition.
 """
 from __future__ import annotations
@@ -62,7 +71,7 @@ _LOG = get_logger("copilot.adapters.claude_interpreter")
 API_KEY_ENV = "COPILOT_INTERPRETER_API_KEY"
 
 #: Classification with structured output — the cheapest tier that does this well.
-_MODEL = "claude-haiku-4-5"
+_MODEL = "claude-opus-5"
 
 #: The reply is four short fields; 256 leaves room for a long quoted span without
 #: paying for a model that decided to explain itself.
@@ -70,8 +79,8 @@ _MAX_TOKENS = 256
 
 #: List price per million tokens for :data:`_MODEL`. Only used to log an estimate;
 #: re-check against the published pricing table when the model changes.
-_USD_PER_MTOK_IN = 1.00
-_USD_PER_MTOK_OUT = 5.00
+_USD_PER_MTOK_IN = 5.00
+_USD_PER_MTOK_OUT = 25.00
 
 #: Long descriptions are mostly boilerplate (benefits, EEO statements) and the
 #: level signal is near the top. Capping the tail bounds the worst-case bill;
@@ -170,6 +179,65 @@ def _locate(description: str, span: str) -> tuple[bool, bool]:
     return False, False
 
 
+def verify_interpretation(parsed: Interpretation, description: str) -> Interpretation:
+    """Confirm the span exists and the band agrees with the years given (pure).
+
+    ``evidence_verified`` is true only when a non-empty span was located in the
+    description. A band asserted without a locatable span is forced to ``LOW`` — it
+    may still be right, but nothing in the posting backs it. ``UNKNOWN`` is exempt:
+    it asserts nothing, so it needs no support.
+
+    Public and pure because there are two routes to an interpretation — the Messages
+    API and a Claude Code batch — and a model's answer must clear the same bar
+    whichever produced it. This is the only place that decides what "verified" means.
+    """
+    found, verbatim = (
+        _locate(description, parsed.evidence) if parsed.evidence else (False, False)
+    )
+    confidence = parsed.confidence
+
+    if found and not verbatim:
+        confidence = confidence.downgraded()
+    elif not found and parsed.band is not Level.UNKNOWN:
+        confidence = Confidence.LOW
+
+    # Free self-consistency check against the rule tier's own mapping: if the model
+    # reports 7 years and calls it entry, one of the two is wrong.
+    if (
+        parsed.min_years is not None
+        and parsed.band is not Level.UNKNOWN
+        and level_from_years(parsed.min_years) is not parsed.band
+    ):
+        confidence = confidence.downgraded()
+
+    return Interpretation(
+        band=parsed.band,
+        min_years=parsed.min_years,
+        evidence=parsed.evidence,
+        confidence=confidence,
+        evidence_verified=found,
+    )
+
+
+def _is_auth_failure(exc: Exception) -> bool:
+    """Whether an exception means the credential itself is rejected.
+
+    Matched on class name rather than by importing the SDK's exception types: the SDK
+    is imported lazily so the package works without it installed, and importing it
+    here to catch it would undo that. The names are stable public API
+    (``AuthenticationError`` is 401, ``PermissionDeniedError`` is 403).
+
+    Deliberately narrow. A 429 or a 529 is transient and the *next* posting may well
+    succeed, so those must not trip the breaker — the failure this guards against is
+    the one that is identical for every posting in the batch.
+    """
+    return type(exc).__name__ in _AUTH_FAILURE_TYPES
+
+
+#: Rejected-credential exception names. 401 and 403 only.
+_AUTH_FAILURE_TYPES = frozenset({"AuthenticationError", "PermissionDeniedError"})
+
+
 class ClaudeInterpreter:
     """InterpreterPort backed by a hosted LLM, cached by posting id.
 
@@ -197,6 +265,9 @@ class ClaudeInterpreter:
     ) -> None:
         self._api_key = api_key
         self._model = model
+        #: Set once a 401/403 proves the credential is rejected, so the rest of the
+        #: batch is skipped instead of re-proving it per posting.
+        self._auth_failed = False
         self._store = store
         self._client = client
         self._max_description_chars = max_description_chars
@@ -278,6 +349,9 @@ class ClaudeInterpreter:
         client = self._get_client()
         if client is None:
             return None
+        if self._auth_failed:
+            # Set by a previous 401/403 in this same batch. See _auth_failed.
+            return None
 
         self._stats.calls += 1
         try:
@@ -309,6 +383,31 @@ class ClaudeInterpreter:
                     }
                 },
             )
+            if _is_auth_failure(exc):
+                # A rejected credential is not a per-posting problem, and retrying it
+                # 631 more times only spends the cron's remaining seconds discovering
+                # the same 401. Measured before this existed: 12 postings produced 12
+                # failed calls, so the real corpus would produce 631 — on a run that
+                # already uses 786 s of its 900 s budget.
+                #
+                # Scoped to the instance, not the process: the next run builds a new
+                # interpreter and re-reads the parameter, so fixing the key takes
+                # effect on the next sweep with nothing to reset by hand.
+                self._auth_failed = True
+                _LOG.error(
+                    "interpret_auth_failed_giving_up",
+                    extra={
+                        "extra_fields": {
+                            "parameter": self._secret_id,
+                            "remaining_skipped": True,
+                            "hint": (
+                                "the credential was rejected; a claude setup-token "
+                                "(sk-ant-oat01-) cannot call the Messages API — that "
+                                "needs a Console key (sk-ant-api03-)"
+                            ),
+                        }
+                    },
+                )
             return None
 
         self._record_usage(response)
@@ -402,22 +501,16 @@ class ClaudeInterpreter:
         )
 
     def _verify(self, parsed: Interpretation, description: str, posting_id: str) -> Interpretation:
-        """Confirm the span exists and the band agrees with the years given.
+        """Verify, and log/count the one case worth alerting on.
 
-        ``evidence_verified`` is true only when a non-empty span was located in
-        the description. A band asserted without a locatable span is forced to
-        ``LOW`` — it may still be right, but nothing in the posting backs it.
-        ``UNKNOWN`` is exempt: it asserts nothing, so it needs no support.
+        The judgement itself lives in :func:`verify_interpretation` so the batch
+        route in ``scripts/level_batch.py`` applies exactly the same rules. Two
+        implementations of "is this evidence real" would eventually disagree, and the
+        disagreement would show up as a posting that one route trusts and the other
+        does not.
         """
-        found, verbatim = (
-            _locate(description, parsed.evidence) if parsed.evidence else (False, False)
-        )
-        confidence = parsed.confidence
-
-        if found and not verbatim:
-            confidence = confidence.downgraded()
-        elif not found and parsed.band is not Level.UNKNOWN:
-            confidence = Confidence.LOW
+        checked = verify_interpretation(parsed, description)
+        if not checked.evidence_verified and parsed.band is not Level.UNKNOWN:
             self._stats.unverified += 1
             _LOG.warning(
                 "interpret_evidence_unverified",
@@ -429,23 +522,7 @@ class ClaudeInterpreter:
                     }
                 },
             )
-
-        # Free self-consistency check against the rule tier's own mapping: if the
-        # model reports 7 years and calls it entry, one of the two is wrong.
-        if (
-            parsed.min_years is not None
-            and parsed.band is not Level.UNKNOWN
-            and level_from_years(parsed.min_years) is not parsed.band
-        ):
-            confidence = confidence.downgraded()
-
-        return Interpretation(
-            band=parsed.band,
-            min_years=parsed.min_years,
-            evidence=parsed.evidence,
-            confidence=confidence,
-            evidence_verified=found,
-        )
+        return checked
 
     # --- prompt --------------------------------------------------------------
 
