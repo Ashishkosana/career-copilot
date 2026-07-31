@@ -809,6 +809,35 @@ const REASON_TEXT = {
     + 'it — so nothing live could be read.',
   store_unavailable:
     'The API answered but could not read its store, so nothing live could be read.',
+  // The two states the read API answers when the daily screening pass has not left it
+  // anything to serve. Both are 503 and both are ours, but they are different facts and
+  // a visitor can act on the difference: the first says the pipeline has not run over
+  // this corpus yet, the second says it ran but too long ago to present as current.
+  // Spelled out rather than left to the generic fallback, because a bare
+  // "corpus_not_screened" on the page is indistinguishable from a crash — and telling
+  // "nothing screened yet" apart from "the service is broken" is the entire reason
+  // these are named codes instead of a timeout.
+  corpus_not_screened:
+    'The API is up, but the daily pass that decides which roles are applicable has not '
+    + 'published a result for this corpus yet, so there is nothing live to rank. These '
+    + 'rows are the snapshot this page was built with.',
+  screening_view_stale:
+    'The API is up, but its most recent screening pass is too old to show as current — '
+    + 'the daily run has missed at least two days. These rows are the snapshot this '
+    + 'page was built with.',
+  // The other two states the read API can answer, both of them about one *filter*
+  // rather than about the corpus. They matter here because a match-tier filter has to
+  // score every candidate before it can report how many matched, and that is the one
+  // read whose cost grows with the applicable list. Named for the same reason as the
+  // pair above: the filter failing is a different fact from the API failing, and only
+  // one of them is worth clearing the filter over.
+  filter_scan_too_slow:
+    'The API gave up part-way through applying that filter rather than risk timing out '
+    + '— scoring every match takes longer than it is allowed to spend. Try it again, or '
+    + 'drop the match-tier filter and page through instead.',
+  too_many_rows_to_filter:
+    'That filter would have to be applied across more roles than the API will scan in '
+    + 'one request. Page through the list instead of filtering it.',
   // Both come from handlers/public_api.py and both mean the fault is ours, not the
   // visitor's: the projection refused to publish a payload it no longer recognised, or
   // the public route lost the principal it hands the read path. Named rather than

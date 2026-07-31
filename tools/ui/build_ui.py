@@ -574,19 +574,79 @@ def collect_from_api(api: Any, reader: tuple[Any, str, Any], *, desc_chars: int,
 PUBLISHED_FIELDS = frozenset({"prosePublished", "quoteMaxChars"})
 
 
-def build_reader(api: Any, settings: Any) -> tuple[Any, str, Any]:
-    """The store, the résumé text, and one shared screened-index cache.
+def publish_screening_view(repo: Path, store: Any, *, now: datetime, verbose: bool) -> None:
+    """Make sure the local store has a screening view, screening the corpus if not.
 
-    Shared rather than built per caller: a cold :class:`IndexCache` screens all 25,294
-    open postings, which is most of this build's runtime. The snapshot collection and the
-    public-route contract check therefore run against the *same* index — which also
-    means the contract check compares like with like instead of two passes that could
-    have seen different corpora.
+    The read API no longer screens anything: it serves a view the daily cron
+    materialises, and answers 503 ``corpus_not_screened`` when there is none. That is
+    the right behaviour in Lambda and it left this script with nothing to build a page
+    out of — every route returned 503 on a laptop, because a laptop has no cron.
+
+    So the build plays the cron for one pass. Deliberately through the *production*
+    builder, ``services.daily_briefing.build_screening_view`` plus the store's own
+    ``save_screening``, and not a shape assembled here: a page built from a
+    hand-rolled view would prove only that this file agrees with itself, which is
+    exactly how the read path came to 504 with every local check green.
+
+    Only when there is no usable view. A view the cron published, or one an earlier
+    build published minutes ago, is reused — the screen is ~39 s over 25,294 postings
+    and re-paying it per build buys nothing. Staleness is the API's own rule, so this
+    cannot publish a page the API would then refuse to serve.
     """
+    summary = store.screening_summary()
+    if summary is not None and not summary.is_stale(now):
+        if verbose:
+            print(
+                f"screening view: reusing generation {summary.generation} "
+                f"({summary.screened} screened, {summary.eligible_total} eligible, "
+                f"{summary.age_hours(now):.1f} h old)"
+            )
+        return
+
+    src = repo / "backend" / "src"
+    if str(src) not in sys.path:
+        sys.path.insert(0, str(src))
+    try:
+        from copilot.services.daily_briefing import (  # type: ignore[import-untyped] # noqa: PLC0415
+            build_screening_view,
+        )
+    except ImportError as exc:  # pragma: no cover - the venv check already ran
+        raise BuildError(f"cannot import the screening view builder: {exc}") from exc
+
+    why = "none published" if summary is None else "the published one is stale"
+    if verbose:
+        print(f"screening view: {why} — screening the local corpus (~40 s)")
+    corpus = store.open_postings()
+    view = build_screening_view(corpus, now=now)
+    # Rows first, summary last. The store's contract, not this caller's choice: the
+    # summary is the publish, so a build interrupted here leaves no half-written view.
+    store.save_screening(view.rows, summary=view.summary)
+    if verbose:
+        published = view.summary
+        print(
+            f"screening view: published {len(view.rows)} rows over {published.screened} "
+            f"postings — {published.eligible_total} eligible, "
+            f"{published.internship_total} internships, {published.excluded} excluded"
+        )
+
+
+def build_reader(api: Any, settings: Any, *, repo: Path, now: datetime,
+                 verbose: bool) -> tuple[Any, str, Any]:
+    """The store, the résumé text, and one shared summary cache.
+
+    The cache is shared rather than built per caller so the snapshot collection and
+    the public-route contract check read the *same* screening generation — otherwise
+    the contract check could compare against a pass the snapshot never saw. It holds
+    one summary item now, not a screening pass over the whole corpus: that pass is
+    what made this build slow and the API 504, and it happens once, above, instead of
+    on every read.
+    """
+    store = api.build_store(settings)
+    publish_screening_view(repo, store, now=now, verbose=verbose)
     return (
-        api.build_store(settings),
+        store,
         api.load_resume_text(settings),
-        api.IndexCache(ttl_seconds=3600.0),
+        api.SummaryCache(ttl_seconds=3600.0),
     )
 
 
@@ -1265,7 +1325,7 @@ def collect(args: argparse.Namespace, *, now: datetime) -> dict[str, Any]:
         print(f"snapshot: {args.data} (legacy export, no scores)")
     else:
         api, public, settings = load_backend(args.repo)
-        reader = build_reader(api, settings)
+        reader = build_reader(api, settings, repo=args.repo, now=now, verbose=not args.quiet)
         snapshot = collect_from_api(
             api, reader, desc_chars=args.desc_chars,
             group_limit=args.group_limit, now=now, verbose=not args.quiet,

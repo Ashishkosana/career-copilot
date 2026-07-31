@@ -222,6 +222,48 @@ export class MonitoringStack extends cdk.Stack {
     });
 
     // ----------------------------------------------------------------------
+    // The one failure the cron no longer raises on.
+    //
+    // `adapters/dynamodb_store.py` writes the briefing and the job list as the last
+    // two statements of a run, and it *contains* their failures: by then the corpus
+    // is already committed, the schedule runs with `retryAttempts: 0`, and raising
+    // also skipped the briefing email and the reply drafts that follow. That
+    // containment is right, and it costs the one thing containment always costs —
+    // CronFailed below can no longer see it. The first live run died exactly here,
+    // on a key-schema ValidationException, and it was only visible *because* it
+    // raised.
+    //
+    // So the log line gets its own alarm. Matched on `message` because that is the
+    // field `logging.py` puts the event name in, the same shape the supply filters
+    // above match on; no metricValue expression, because one occurrence is the
+    // signal and the count is in the log.
+    // ----------------------------------------------------------------------
+    alarm("BriefingWriteFailed", {
+      metric: new logs.MetricFilter(this, "BriefingWriteFailedFilter", {
+        logGroup: cronLogGroup,
+        filterName: "career-copilot-BriefingWriteFailed",
+        metricNamespace: NAMESPACE,
+        metricName: "BriefingWriteFailed",
+        filterPattern: logs.FilterPattern.literal(
+          '{ $.message = "briefing_store_write_failed" }',
+        ),
+        metricValue: "1",
+      }).metric({ statistic: "Sum", period: cdk.Duration.days(1) }),
+      threshold: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      // Absence is the healthy state here, and "the cron did not run at all" is
+      // already alarmed twice above.
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      alarmDescription:
+        "The daily run could not write the briefing or the job list, and swallowed " +
+        "the failure so the rest of the run could finish. The corpus and the " +
+        "worklist API are unaffected; what is missing is today's briefing and " +
+        "`GET /briefing`. The log line carries the operation, the table and the key " +
+        "attribute names the adapter used — read those first, because a key-schema " +
+        "mismatch is what caused this the one time it has happened.",
+    });
+
+    // ----------------------------------------------------------------------
     // The cron itself
     // ----------------------------------------------------------------------
     const lambdaMetric = (
