@@ -179,6 +179,46 @@ def _locate(description: str, span: str) -> tuple[bool, bool]:
     return False, False
 
 
+def verify_interpretation(parsed: Interpretation, description: str) -> Interpretation:
+    """Confirm the span exists and the band agrees with the years given (pure).
+
+    ``evidence_verified`` is true only when a non-empty span was located in the
+    description. A band asserted without a locatable span is forced to ``LOW`` — it
+    may still be right, but nothing in the posting backs it. ``UNKNOWN`` is exempt:
+    it asserts nothing, so it needs no support.
+
+    Public and pure because there are two routes to an interpretation — the Messages
+    API and a Claude Code batch — and a model's answer must clear the same bar
+    whichever produced it. This is the only place that decides what "verified" means.
+    """
+    found, verbatim = (
+        _locate(description, parsed.evidence) if parsed.evidence else (False, False)
+    )
+    confidence = parsed.confidence
+
+    if found and not verbatim:
+        confidence = confidence.downgraded()
+    elif not found and parsed.band is not Level.UNKNOWN:
+        confidence = Confidence.LOW
+
+    # Free self-consistency check against the rule tier's own mapping: if the model
+    # reports 7 years and calls it entry, one of the two is wrong.
+    if (
+        parsed.min_years is not None
+        and parsed.band is not Level.UNKNOWN
+        and level_from_years(parsed.min_years) is not parsed.band
+    ):
+        confidence = confidence.downgraded()
+
+    return Interpretation(
+        band=parsed.band,
+        min_years=parsed.min_years,
+        evidence=parsed.evidence,
+        confidence=confidence,
+        evidence_verified=found,
+    )
+
+
 def _is_auth_failure(exc: Exception) -> bool:
     """Whether an exception means the credential itself is rejected.
 
@@ -461,22 +501,16 @@ class ClaudeInterpreter:
         )
 
     def _verify(self, parsed: Interpretation, description: str, posting_id: str) -> Interpretation:
-        """Confirm the span exists and the band agrees with the years given.
+        """Verify, and log/count the one case worth alerting on.
 
-        ``evidence_verified`` is true only when a non-empty span was located in
-        the description. A band asserted without a locatable span is forced to
-        ``LOW`` — it may still be right, but nothing in the posting backs it.
-        ``UNKNOWN`` is exempt: it asserts nothing, so it needs no support.
+        The judgement itself lives in :func:`verify_interpretation` so the batch
+        route in ``scripts/level_batch.py`` applies exactly the same rules. Two
+        implementations of "is this evidence real" would eventually disagree, and the
+        disagreement would show up as a posting that one route trusts and the other
+        does not.
         """
-        found, verbatim = (
-            _locate(description, parsed.evidence) if parsed.evidence else (False, False)
-        )
-        confidence = parsed.confidence
-
-        if found and not verbatim:
-            confidence = confidence.downgraded()
-        elif not found and parsed.band is not Level.UNKNOWN:
-            confidence = Confidence.LOW
+        checked = verify_interpretation(parsed, description)
+        if not checked.evidence_verified and parsed.band is not Level.UNKNOWN:
             self._stats.unverified += 1
             _LOG.warning(
                 "interpret_evidence_unverified",
@@ -488,23 +522,7 @@ class ClaudeInterpreter:
                     }
                 },
             )
-
-        # Free self-consistency check against the rule tier's own mapping: if the
-        # model reports 7 years and calls it entry, one of the two is wrong.
-        if (
-            parsed.min_years is not None
-            and parsed.band is not Level.UNKNOWN
-            and level_from_years(parsed.min_years) is not parsed.band
-        ):
-            confidence = confidence.downgraded()
-
-        return Interpretation(
-            band=parsed.band,
-            min_years=parsed.min_years,
-            evidence=parsed.evidence,
-            confidence=confidence,
-            evidence_verified=found,
-        )
+        return checked
 
     # --- prompt --------------------------------------------------------------
 

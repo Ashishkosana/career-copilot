@@ -102,6 +102,9 @@ ignore_missing_imports = true
 # google's own files, not our calls into them. See gmail_mailbox.py:202.
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+# `scripts` is importable so the batch route can be tested rather than only run.
+# It is the one script carrying real logic — it decides what a model is asked and
+# whether its answer is trustworthy — and that belongs under test, not under review.
+pythonpath = ["src", "scripts"]
 testpaths = ["tests"]
 addopts = "-q"
