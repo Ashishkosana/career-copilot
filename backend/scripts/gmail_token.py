@@ -33,11 +33,62 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 #: argv is the program name plus the client-secret path, and nothing else.
 EXPECTED_ARGC = 2
 
+#: Where Google puts the file, so a wrong invocation can name real candidates
+#: instead of asking the reader to go find them.
+DOWNLOADS = Path.home() / "Downloads"
+
+
+def _describe(path: Path) -> str:
+    """``project_id`` for a client-secret file, or why it cannot be read.
+
+    Only the project id is read. The file also holds ``client_secret``, and this
+    runs in a terminal whose scrollback outlives the shell.
+    """
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"unreadable ({type(exc).__name__})"
+    block = doc.get("installed") or doc.get("web") or {}
+    kind = "Desktop app" if "installed" in doc else "Web app — needs Desktop instead"
+    return f"{block.get('project_id', '?')}  [{kind}]"
+
+
+def _usage(argv: list[str]) -> int:
+    """A short, actionable error. Never the module docstring.
+
+    Printing the whole rationale on a bad invocation buries the one line that
+    matters, and the first real run hit exactly that: the glob
+    ``client_secret_*.json`` matched **two** files, so argv was 3, and the reader
+    got fifteen lines about OAuth instead of "you passed two files".
+    """
+    given = argv[1:]
+    if len(given) > 1:
+        print(f"Pass one file; the glob matched {len(given)}:\n", file=sys.stderr)
+    else:
+        print("Pass the client-secret JSON you downloaded from Google Cloud.\n",
+              file=sys.stderr)
+
+    found = sorted(DOWNLOADS.glob("client_secret_*.json"))
+    if found:
+        print("Candidates in ~/Downloads:\n", file=sys.stderr)
+        for path in found:
+            print(f"  {_describe(path)}\n    {path}\n", file=sys.stderr)
+        print("Then:\n  backend/.venv/bin/python backend/scripts/gmail_token.py <one path>",
+              file=sys.stderr)
+    else:
+        print(
+            "None found in ~/Downloads. In console.cloud.google.com:\n"
+            "  APIs & Services -> Credentials -> Create OAuth client ID\n"
+            "  Application type: Desktop app  (a Web app client cannot do this flow)\n"
+            "  then Download JSON.",
+            file=sys.stderr,
+        )
+    return 2
+
 
 def main(argv: list[str]) -> int:
     if len(argv) != EXPECTED_ARGC:
-        print(__doc__)
-        return 2
+        return _usage(argv)
 
     secrets_file = Path(argv[1]).expanduser()
     if not secrets_file.is_file():
