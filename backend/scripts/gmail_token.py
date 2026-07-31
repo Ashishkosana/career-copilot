@@ -96,11 +96,40 @@ def _usage(argv: list[str]) -> int:
     return 2
 
 
+def _newest_candidate() -> Path | None:
+    """The most recently downloaded client-secret file, or ``None``.
+
+    Run with no argument this is what gets used, because the alternative was asking
+    the reader to paste a 110-character path. That path wrapped in the terminal every
+    single time: once it split `-c` from its value, once it swallowed the space before
+    an argument, and once zsh tried to *execute* the JSON file on the second line. A
+    long path in an instruction is a defect in the instruction.
+
+    Newest wins, and which one it picked is printed, because the directory
+    accumulates a file per attempt: after one secret reset there were three, two of
+    them dead.
+    """
+    found = sorted(
+        DOWNLOADS.glob("client_secret_*.json"), key=lambda f: f.stat().st_mtime, reverse=True
+    )
+    return found[0] if found else None
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != EXPECTED_ARGC:
+    if len(argv) > EXPECTED_ARGC:
         return _usage(argv)
 
-    secrets_file = Path(argv[1]).expanduser()
+    if len(argv) == EXPECTED_ARGC:
+        secrets_file = Path(argv[1]).expanduser()
+    else:
+        candidate = _newest_candidate()
+        if candidate is None:
+            return _usage(argv)
+        secrets_file = candidate
+        print(f"Using the newest client secret in ~/Downloads:\n  {_describe(candidate)}")
+        print(f"  {candidate.name}\n")
+        print("Check the app name on the consent screen matches this project before approving.\n")
+
     if not secrets_file.is_file():
         print(f"No such file: {secrets_file}", file=sys.stderr)
         return 1
