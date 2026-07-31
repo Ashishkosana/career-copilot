@@ -8,6 +8,7 @@ fail safe in every direction.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -19,6 +20,7 @@ from copilot.adapters.claude_interpreter import ClaudeInterpreter
 from copilot.domain.posting import Posting
 from copilot.domain.seniority import Level
 from copilot.ports.interpreter import Confidence, Interpretation
+from copilot.ports.postingstore import ScreenedPage, ScreenedRow, ScreenSummary
 
 _DESCRIPTION = (
     "About the role\n"
@@ -124,6 +126,20 @@ class _FakeStore:
         raise NotImplementedError
 
     def mark_applied(self, posting_id: str, *, now: datetime) -> None:
+        raise NotImplementedError
+
+    def postings_by_id(self, posting_ids: Sequence[str]) -> dict[str, Posting]:
+        raise NotImplementedError
+
+    def save_screening(self, rows: Iterable[ScreenedRow], *, summary: ScreenSummary) -> None:
+        raise NotImplementedError
+
+    def screening_summary(self) -> ScreenSummary | None:
+        raise NotImplementedError
+
+    def screened_page(
+        self, view: str, *, generation: str, limit: int, after: str | None = None
+    ) -> ScreenedPage:
         raise NotImplementedError
 
 

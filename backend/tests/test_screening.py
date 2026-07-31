@@ -260,6 +260,29 @@ class TestWorklist:
         assert len(kept) == 2
         assert kept[0].posting.posted_at is not None
 
+    def test_one_naive_posted_at_does_not_take_the_whole_batch_down(self) -> None:
+        """The bug: ``kept.sort(key=lambda d: d.posting.posted_at or _EPOCH)``.
+
+        ``_EPOCH`` is timezone-aware and the ATS adapters do not all return an
+        offset, so a single naive ``posted_at`` in a batch raised ``TypeError: can't
+        compare offset-naive and offset-aware datetimes`` and lost every posting in the
+        call. It hid well: a sort of one element never compares anything, so it needed
+        two kept postings *and* a mixed pair of offsets to show up — and the naive one
+        still has to be ordered correctly, not merely tolerated.
+        """
+        naive_recent = Posting(
+            title="Software Engineer I", company="N", url="https://x/naive", ats="workday",
+            # Deliberately naive — that is the input under test.
+            description="d", posted_at=datetime(2026, 7, 20),
+        )
+        aware_older = make("New Grad Software Engineer", desc="d", when=2)
+        undated = Posting(
+            title="Junior Developer", company="U", url="https://x/undated", ats="workday",
+            desc_available=False,
+        )
+        kept, _, _ = screen_all([aware_older, undated, naive_recent])
+        assert [d.posting.company for d in kept] == ["N", "Acme", "U"]
+
     def test_report_accounts_for_every_posting(self) -> None:
         postings = [
             make("New Grad Software Engineer", desc="d"),

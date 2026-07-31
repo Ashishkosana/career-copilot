@@ -302,5 +302,22 @@ def screen_all(
         decision = screen(posting, wanted=wanted, include_internships=include_internships)
         report.note(decision)
         (kept if decision.kept else excluded).append(decision)
-    kept.sort(key=lambda d: d.posting.posted_at or _EPOCH, reverse=True)
+    kept.sort(key=_recency, reverse=True)
     return kept, excluded, report
+
+
+def _recency(decision: ScreenDecision) -> datetime:
+    """Sort key that survives a naive ``posted_at``.
+
+    ``posted_at or _EPOCH`` was the obvious spelling and it raises: ``_EPOCH`` is
+    aware, the ATS adapters do not all return an offset, and Python refuses to compare
+    an aware datetime with a naive one. So *one* dateless-offset posting in a batch took
+    the whole call down with ``TypeError: can't compare offset-naive and offset-aware
+    datetimes`` — and only once at least two postings were kept, since a one-element
+    sort never compares anything. Naive input is read as UTC, matching
+    ``ports.postingstore.sort_stamp``, which is what writes this ordering down.
+    """
+    posted = decision.posting.posted_at
+    if posted is None:
+        return _EPOCH
+    return posted if posted.tzinfo is not None else posted.replace(tzinfo=UTC)

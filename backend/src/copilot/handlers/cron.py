@@ -120,8 +120,19 @@ def briefing_response(run: DailyRun) -> dict[str, Any]:
     "quiet morning" or "Gmail refused us" depending on it. A metric filter on
     ``inbox_ok`` is the natural companion alarm to the supply ones.
 
-    The three extra keys appear only when something is wrong, so a healthy summary
+    The screening-view counts are here for exactly the same reason. The public read
+    API now serves a view the cron writes, so a screen that silently produced
+    nothing is a blank website with a green cron — the 2026 version of the fixture
+    bug. ``screened`` says how much of the corpus the pass covered, ``eligible`` and
+    ``internships`` are the two collections the page renders, and ``view_rows`` says
+    how much was actually written: a run with ``screened: 47538`` and
+    ``view_rows: 0`` screened fine and failed to publish, which is a different fault
+    with a different fix. All four are unconditional, so a metric filter can alarm
+    on ``eligible`` dropping without having to guess whether the key exists.
+
+    The four extra keys appear only when something is wrong, so a healthy summary
     stays small: ``close_skipped`` names the reason nothing was closed,
+    ``screen_skipped`` names the reason the view was not published,
     ``failed_sources`` lists the boards that did not answer, and ``inbox_error``
     names the mailbox failure.
     """
@@ -142,12 +153,19 @@ def briefing_response(run: DailyRun) -> dict[str, Any]:
         "excluded": supply.excluded,
         "sources_ok": supply.sources_ok,
         "sources_failed": supply.sources_failed,
+        # the materialised screening view the read API serves
+        "screened": supply.screened,
+        "eligible": supply.eligible,
+        "internships": supply.internships,
+        "view_rows": supply.view_rows,
         # what reached the briefing
         "jobs": len(run.briefing.jobs),
         "scored": run.scored,
     }
     if supply.close_skipped:
         summary["close_skipped"] = supply.close_skipped
+    if supply.screen_skipped:
+        summary["screen_skipped"] = supply.screen_skipped
     if supply.failed_sources:
         summary["failed_sources"] = list(supply.failed_sources)
     if run.inbox_error:

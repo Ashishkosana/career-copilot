@@ -1,10 +1,24 @@
-"""Persistence behaviour — the part that makes a daily digest possible."""
+"""Persistence behaviour — the part that makes a daily digest possible.
+
+The behavioural cases live in ``tests/test_dynamodb_posting_store.py``, where one
+parametrised fixture drives *both* implementations of ``PostingStorePort`` through
+the same assertions. What is left here is what only the SQLite adapter can get
+wrong: schema creation on an already-populated file, and the one place the two
+stores deliberately differ — SQLite sweeps a superseded screening generation with
+a DELETE, while DynamoDB leaves it to TTL because there a delete costs what a
+write costs and there are ~84,000 of them a day.
+"""
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
 
 from copilot.adapters.sqlite_posting_store import SqlitePostingStore
 from copilot.domain.posting import Posting
+from copilot.ports.postingstore import VIEW_KEPT, ScreenedRow, ScreenSummary
 
 DAY1 = datetime(2026, 7, 1, 9, 0, tzinfo=UTC)
 DAY2 = DAY1 + timedelta(days=1)
@@ -156,3 +170,93 @@ class TestStats:
         assert s.stats() == {
             "total": 3, "open": 2, "closed": 1, "interpreted": 1, "applied": 1
         }
+
+
+def kept_row(n: int) -> ScreenedRow:
+    return ScreenedRow(
+        posting_id=post(n).id,
+        view=VIEW_KEPT,
+        posted_at=DAY1,
+        kept=True,
+        level="entry",
+        level_source="title",
+        level_why="the title carries an entry marker",
+        eligibility_checked=True,
+        sponsorship="unstated",
+    )
+
+
+def summary(generation: str, *, kept: int) -> ScreenSummary:
+    return ScreenSummary(
+        generation=generation,
+        screened_at=DAY2,
+        corpus_size=kept,
+        screened=kept,
+        kept=kept,
+        excluded=0,
+        gates={},
+        needs_level_check=0,
+        eligible_total=kept,
+        internship_total=0,
+    )
+
+
+class TestScreeningViewStorage:
+    def test_a_superseded_generation_is_swept(self) -> None:
+        """The one place the two stores differ on purpose. SQLite can afford the
+        DELETE; DynamoDB uses TTL because there a delete costs what a write costs and
+        a run writes ~84,000 rows. Left unswept, a laptop's file would grow by a
+        whole screening pass a day for rows nothing can address.
+        """
+        s = store()
+        s.save_screening([kept_row(1), kept_row(2)], summary=summary("gen-1", kept=2))
+        s.save_screening([kept_row(3)], summary=summary("gen-2", kept=1))
+        generations = {
+            str(row["generation"])
+            for row in s._conn.execute("SELECT DISTINCT generation FROM screen_rows")
+        }
+        assert generations == {"gen-2"}
+
+    def test_the_sweep_happens_after_the_publish_not_before(self) -> None:
+        """Deleting first would empty the live view for the duration of the write —
+        a window in which the page is blank and honestly reports itself as complete.
+        """
+        s = store()
+        s.save_screening([kept_row(1)], summary=summary("gen-1", kept=1))
+        published = s.screening_summary()
+        assert published is not None and published.generation == "gen-1"
+        assert len(s.screened_page(VIEW_KEPT, generation="gen-1", limit=10).rows) == 1
+
+    def test_only_one_summary_row_can_exist(self) -> None:
+        """"Which generation is current" must not be a query with two answers."""
+        s = store()
+        s.save_screening([kept_row(1)], summary=summary("gen-1", kept=1))
+        s.save_screening([kept_row(2)], summary=summary("gen-2", kept=1))
+        [(count,)] = s._conn.execute("SELECT COUNT(*) FROM screen_summary").fetchall()
+        assert count == 1
+        with pytest.raises(sqlite3.IntegrityError):
+            s._conn.execute(
+                "INSERT INTO screen_summary (id, generation, payload) VALUES ('OTHER', 'g', '{}')"
+            )
+
+    def test_the_view_tables_appear_on_an_already_populated_file(self, tmp_path: Path) -> None:
+        """``CREATE TABLE IF NOT EXISTS`` is a no-op on an existing file, which is the
+        trap ``experience_level`` fell into: a new *column* needs a migration. New
+        *tables* do not — but only if the schema script actually runs on every open,
+        which is what this asserts against the developer's real 25k-row file shape.
+        """
+        path = tmp_path / "postings.db"
+        first = SqlitePostingStore(path)
+        first.sync([post(1)], now=DAY1)
+        first.close()
+
+        reopened = SqlitePostingStore(path)
+        reopened.save_screening([kept_row(1)], summary=summary("gen-1", kept=1))
+        stored = reopened.screening_summary()
+        assert stored is not None and stored.kept == 1
+        reopened.close()
+
+        # ...and it survives another open, which is what a warm Lambda does.
+        again = SqlitePostingStore(path)
+        assert len(again.screened_page(VIEW_KEPT, generation="gen-1", limit=10).rows) == 1
+        again.close()

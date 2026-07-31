@@ -71,6 +71,65 @@ def test_cron_run_briefing_and_response() -> None:
     assert mailbox.sent[0][0] == "me@example.com"
 
 
+class TestTheRunSummaryReportsTheScreeningView:
+    """A screen that silently produced nothing must be as visible as a fetch that did.
+
+    The public read API now serves a view the cron writes, so "green cron, blank
+    website" is a reachable state — the 2026 restaging of the fixture bug, where a
+    job source that existed on no machine served four invented companies and every
+    count downstream looked fine.
+    """
+
+    def _response(self, *titles: str) -> dict[str, Any]:
+        postings = [make_posting(n, title) for n, title in enumerate(titles, start=1)]
+        run = cron.run_briefing(
+            _service(FakeMailbox([]), FakePostings(postings), FakeStore()),
+            Settings(owner_user_id="u1"),
+        )
+        return cron.briefing_response(run)
+
+    def test_the_view_counts_are_unconditional(self) -> None:
+        """A metric filter on ``eligible`` must not have to guess whether the key is
+        there; a conditional count is how a shrinking corpus stays invisible."""
+        response = self._response(
+            "New Grad Software Engineer", "Senior Staff Engineer", "Marketing Intern"
+        )
+        assert response["screened"] == 3
+        assert response["eligible"] == 1
+        assert response["internships"] == 0
+        assert response["view_rows"] >= 1
+
+    def test_screened_and_fetched_are_both_reported(self) -> None:
+        """They are different numbers — ``screened`` is the open corpus, ``fetched`` is
+        what the boards returned this morning — and a run where they diverge is worth
+        looking at, which is only possible if both are present."""
+        response = self._response("New Grad Software Engineer")
+        assert response["fetched"] == 1
+        assert response["screened"] == 1
+
+    def test_the_internships_collection_is_reported_separately(self) -> None:
+        """48 software internships against 318 internship-gate fires on the live
+        corpus. Reporting only the gate count would overstate the section 6-fold."""
+        response = self._response("Software Engineer Intern", "Marketing Intern")
+        assert response["internships"] == 1
+        assert response["eligible"] == 0
+
+    def test_a_healthy_run_carries_no_skip_key(self) -> None:
+        response = self._response("New Grad Software Engineer")
+        assert "screen_skipped" not in response
+        assert "close_skipped" not in response
+
+    def test_an_empty_sweep_still_reports_every_view_count(self) -> None:
+        """``screened: 0`` with ``fetched: 0`` is a broken sweep; the same zero with a
+        non-zero ``fetched`` would be a broken screen. Both have to be sayable."""
+        response = self._response()
+        assert response["fetched"] == 0
+        assert response["screened"] == 0
+        assert response["eligible"] == 0
+        assert response["view_rows"] == 0
+        assert response["close_skipped"] == "empty_fetch"
+
+
 def test_cron_build_service_wires_real_adapters() -> None:
     service = cron.build_service(Settings())
     # mypy already proves the port contracts; assert the wiring at runtime too.
