@@ -26,7 +26,7 @@ jobs:
         with:
           python-version: "3.13"
       - name: Install
-        run: pip install -e ".[dev,adapters]"  # adapters extra (boto3/google) — CI tests the adapter layer
+        run: pip install -e ".[dev,adapters,resume]"  # every extra: mypy's answer depends on what is installed
       # `scripts` is included: tailor.py had three strict errors, one of them a
       # `dict[str, object]` of source classes whose `.fetch()` call was unchecked.
       - name: Lint (ruff)

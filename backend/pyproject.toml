@@ -22,6 +22,13 @@ adapters = [
   "google-auth-oauthlib>=1.2",
   "google-genai>=1.0",
 ]
+# scripts/tailor.py verifies a built PDF's text layer. Local-only tooling — Lambda has
+# no browser — but declared so the type gate sees the same imports everywhere. Left out,
+# CI could not resolve them and mypy failed on a PR that passed locally.
+resume = [
+  "pdfplumber>=0.11",
+  "pypdf>=6.0",
+]
 dev = [
   "pytest>=8.2",
   # Pinned exactly, not `>=`. CI installs from this file and ran a *newer* ruff
@@ -79,8 +86,21 @@ module = [
   "googleapiclient.*",
   "google.*",
   "google_auth_oauthlib.*",
+  "pdfplumber.*",
+  "pypdf.*",
 ]
 ignore_missing_imports = true
+# Note what this does *not* cover, because it cost a red PR. `ignore_missing_imports`
+# only applies when the import is **missing**. Without google-auth installed, the name
+# resolves to `Any` and calling it is fine; *with* google-auth installed — it ships no
+# `py.typed` — the import succeeds as untyped and strict mode's `disallow_untyped_calls`
+# fires at the call site. Same source, same mypy, same config, different answer purely
+# because CI installs the `adapters` extra and the local venv had not: the local gate was
+# weaker for having *fewer* packages, which is the opposite of the intuition.
+#
+# The fix is at the call site, not here. mypy's per-module options apply to the module
+# being **checked**, so `disallow_untyped_calls = false` in this block would govern
+# google's own files, not our calls into them. See gmail_mailbox.py:202.
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
