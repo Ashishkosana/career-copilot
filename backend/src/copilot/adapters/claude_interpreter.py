@@ -23,12 +23,21 @@ function the rule tier uses. Both checks are free and both catch real drift.
 a feed for weeks; at ~1,370 input tokens each, re-reading 880 descriptions daily
 would cost more than the model choice ever could.
 
-Measured cost, on ~1,370 input and ~120 output tokens per posting at
-``claude-haiku-4-5`` list price ($1.00 / $5.00 per MTok):
+Cost, on ~1,370 input and ~120 output tokens per posting at ``claude-opus-5``
+list price ($5.00 / $25.00 per MTok):
 
-* **$1.97 per 1,000 postings** — $1.37 input + $0.60 output.
-* The 652-posting backfill: **~$1.28**, once.
-* Steady state is ~2 new postings a day: **~$0.004/day**, ~$1.44/year.
+* **$9.85 per 1,000 postings** — $6.85 input + $3.00 output.
+* The 631-posting backfill: **~$6.22**, once.
+* Steady state is the day's genuinely new postings, which the live corpus puts at
+  ~358: **~$3.53/day** if every one lacks a title marker, and in practice a
+  fraction of that, since most new postings state a level and never reach here.
+
+That is **5x what ``claude-haiku-4-5`` cost** for the same work ($1.97/1,000), and
+the choice is deliberate rather than accidental: this is a classification with a
+fixed output schema, which is the shape a small model handles well. Opus is used
+because it was asked for, and the knob is the ``model`` argument — one string —
+if the bill argues otherwise. The per-posting cache is what keeps either number
+bounded: a posting is interpreted once, ever, not once per run.
 
 Batching is deliberately *not* used. The Batch API halves the price but allows up
 to 24 hours of latency, and at two postings a day it would save $0.002/day while
@@ -36,7 +45,7 @@ making a daily briefing arrive a day late. It is worth exactly one thing — the
 one-time backfill, where $1.28 becomes $0.64 — which does not justify a second
 code path. Prompt caching is likewise skipped and cannot help here: the shared
 prefix is the ~280-token system prompt, and the whole request is ~1,370 tokens —
-both under this model tier's 4,096-token minimum cacheable prefix. The bulk of
+both under the 1,024-token minimum cacheable prefix this tier applies. The bulk of
 every request is the description, which differs per posting by definition.
 """
 from __future__ import annotations
@@ -62,7 +71,7 @@ _LOG = get_logger("copilot.adapters.claude_interpreter")
 API_KEY_ENV = "COPILOT_INTERPRETER_API_KEY"
 
 #: Classification with structured output — the cheapest tier that does this well.
-_MODEL = "claude-haiku-4-5"
+_MODEL = "claude-opus-5"
 
 #: The reply is four short fields; 256 leaves room for a long quoted span without
 #: paying for a model that decided to explain itself.
@@ -70,8 +79,8 @@ _MAX_TOKENS = 256
 
 #: List price per million tokens for :data:`_MODEL`. Only used to log an estimate;
 #: re-check against the published pricing table when the model changes.
-_USD_PER_MTOK_IN = 1.00
-_USD_PER_MTOK_OUT = 5.00
+_USD_PER_MTOK_IN = 5.00
+_USD_PER_MTOK_OUT = 25.00
 
 #: Long descriptions are mostly boilerplate (benefits, EEO statements) and the
 #: level signal is near the top. Capping the tail bounds the worst-case bill;

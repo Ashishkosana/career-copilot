@@ -179,7 +179,7 @@ def test_well_formed_reply_is_parsed_and_verified() -> None:
     assert interp.stats.unverified == 0
 
 
-def test_request_asks_for_structured_output_on_the_cheap_model() -> None:
+def test_request_asks_for_structured_output_on_the_configured_model() -> None:
     """Guards the two things that keep this tier cheap and parseable.
 
     Dropping ``output_config`` makes JSON parsing a failure surface again, and
@@ -189,7 +189,7 @@ def test_request_asks_for_structured_output_on_the_cheap_model() -> None:
     ClaudeInterpreter(client=client).interpret(_POSTING)
 
     sent = client.messages.calls[0]
-    assert sent["model"] == "claude-haiku-4-5"
+    assert sent["model"] == "claude-opus-5"
     schema = sent["output_config"]["format"]
     assert schema["type"] == "json_schema"
     assert schema["schema"]["required"] == ["band", "min_years", "evidence", "confidence"]
@@ -206,7 +206,9 @@ def test_usage_is_accumulated_for_cost_reporting() -> None:
 
     assert interp.stats.input_tokens == 2740
     assert interp.stats.output_tokens == 240
-    assert interp.stats.estimated_cost_usd() == pytest.approx(2740 / 1e6 + 240 / 1e6 * 5)
+    assert interp.stats.estimated_cost_usd() == pytest.approx(
+        2740 / 1e6 * 5 + 240 / 1e6 * 25
+    ), "list price is per-model; a stale constant under-reports the bill silently"
 
 
 # --- the span is an index, not proof ----------------------------------------

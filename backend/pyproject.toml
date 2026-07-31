@@ -20,7 +20,6 @@ adapters = [
   "google-api-python-client>=2.130",
   "google-auth>=2.30",
   "google-auth-oauthlib>=1.2",
-  "google-genai>=1.0",
 ]
 # scripts/tailor.py verifies a built PDF's text layer. Local-only tooling — Lambda has
 # no browser — but declared so the type gate sees the same imports everywhere. Left out,
