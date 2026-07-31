@@ -18,6 +18,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, field_validator
 
+from copilot.domain.demo_boards import is_demo_tenant
+
 SUPPORTED_ATS = frozenset({"greenhouse", "ashby", "lever", "workable", "workday"})
 
 
@@ -49,8 +51,12 @@ class WatchlistEntry(BaseModel):
         return bool(self.tenant)
 
 
-def parse_watchlist(payload: object) -> list[WatchlistEntry]:
-    """Validate a decoded watchlist document (pure — no filesystem)."""
+def parse_watchlist(payload: object, *, allow_demo: bool = False) -> list[WatchlistEntry]:
+    """Validate a decoded watchlist document (pure — no filesystem).
+
+    ``allow_demo`` exists so the adapters' own tests can point at a demo board
+    deliberately; nothing in the product sets it.
+    """
     rows: Iterable[object]
     if isinstance(payload, dict):
         rows = payload.get("companies") or []
@@ -66,8 +72,11 @@ def parse_watchlist(payload: object) -> list[WatchlistEntry]:
             entry = WatchlistEntry.model_validate(row)
         except ValueError:
             continue
-        if entry.is_complete:
-            entries.append(entry)
+        if not entry.is_complete:
+            continue
+        if not allow_demo and is_demo_tenant(entry.tenant):
+            continue
+        entries.append(entry)
     return entries
 
 
