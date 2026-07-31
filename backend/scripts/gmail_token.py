@@ -14,9 +14,13 @@ Run it from the repo, with the client secret file you downloaded from Google Clo
 
     backend/.venv/bin/python backend/scripts/gmail_token.py ~/Downloads/client_secret_*.json
 
-It opens a browser, you approve, and it prints the three values to store. It writes
-nothing to disk and stores nothing in AWS — that is a separate, deliberate step, so
-a mistake here costs one re-run rather than a bad secret in the cloud.
+It opens a browser, you approve, and it writes the result **straight into Secrets
+Manager**. The token never touches stdout, a file, or your shell history.
+
+That is deliberate. An earlier version printed the payload and asked the reader to
+paste it into an ``aws`` command; the first real run ended with a live client_secret
+and refresh_token in a chat window. A credential printed to a terminal is a
+credential in scrollback and in every screenshot after.
 """
 from __future__ import annotations
 
@@ -36,6 +40,12 @@ EXPECTED_ARGC = 2
 #: Where Google puts the file, so a wrong invocation can name real candidates
 #: instead of asking the reader to go find them.
 DOWNLOADS = Path.home() / "Downloads"
+
+#: Where the token goes. Matches the stack's ``GmailSecretName`` output and the
+#: ``COPILOT_GMAIL_SECRET_ID`` the cron receives.
+SECRET_ID = "career-copilot/gmail"
+AWS_PROFILE = "personal"
+AWS_REGION = "us-east-1"
 
 
 def _describe(path: Path) -> str:
@@ -122,24 +132,64 @@ def main(argv: list[str]) -> int:
         )
         return 1
 
-    # Printed, not stored. The three field names are exactly what
-    # `gmail_mailbox.GMAIL_REQUIRED_FIELDS` checks for, so a copy-paste cannot land
-    # under the wrong key.
-    print("\nStore these three values in the career-copilot/gmail secret:\n")
-    print(json.dumps(
+    payload = json.dumps(
         {
             "client_id": creds.client_id,
             "client_secret": creds.client_secret,
             "refresh_token": creds.refresh_token,
             "token_uri": "https://oauth2.googleapis.com/token",
-        },
-        indent=2,
-    ))
-    print(
-        "\nThen, in one command (leading space keeps it out of shell history):\n"
-        "  aws secretsmanager put-secret-value --secret-id career-copilot/gmail \\\n"
-        "    --secret-string '<paste the JSON above>' --profile personal\n"
+        }
     )
+
+    # Written straight to Secrets Manager. This function used to print the payload
+    # and ask the reader to copy-paste it into an `aws` command, and the first person
+    # to run it pasted a live client_secret and refresh_token into a chat window
+    # within the minute. That was the script's fault: a credential printed to a
+    # terminal is a credential in scrollback, in a screenshot, and in whatever the
+    # reader pastes it into next. It now never reaches stdout.
+    return _store(payload)
+
+
+def _store(payload: str) -> int:
+    """Put the payload in Secrets Manager via stdin, printing nothing sensitive.
+
+    ``--secret-string file:///dev/stdin`` rather than passing the value as an
+    argument: an argument is visible in ``ps`` output to every process on the machine
+    for the life of the call, and lands in shell history if anyone repeats it.
+    """
+    import subprocess  # noqa: PLC0415 - only needed on the success path
+
+    cmd = [
+        "aws", "secretsmanager", "put-secret-value",
+        "--secret-id", SECRET_ID,
+        "--secret-string", "file:///dev/stdin",
+        "--profile", AWS_PROFILE,
+        "--region", AWS_REGION,
+    ]
+    try:
+        done = subprocess.run(cmd, input=payload, text=True, capture_output=True, check=False)
+    except FileNotFoundError:
+        print(
+            "The aws CLI is not on PATH, so the token could not be stored.\n"
+            "Nothing was printed — re-run this script once aws is available.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if done.returncode != 0:
+        # stderr may name the secret and the profile, neither of which is secret.
+        print(f"Could not store the token:\n{done.stderr.strip()}", file=sys.stderr)
+        print(
+            "\nThe token is still valid but unsaved, and this script deliberately does\n"
+            "not print it. Fix the error above and re-run — a second consent is free.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"\nStored in {SECRET_ID} ({AWS_PROFILE}/{AWS_REGION}).")
+    print("Nothing was printed to this terminal. Verify presence with:")
+    print(f"  aws secretsmanager describe-secret --secret-id {SECRET_ID} "
+          f"--profile {AWS_PROFILE} --query LastChangedDate")
     return 0
 
 
