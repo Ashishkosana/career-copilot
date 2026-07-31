@@ -457,3 +457,83 @@ def test_confidence_downgrade_floors_at_low() -> None:
     assert Confidence.HIGH.downgraded() is Confidence.MEDIUM
     assert Confidence.MEDIUM.downgraded() is Confidence.LOW
     assert Confidence.LOW.downgraded() is Confidence.LOW
+
+
+class _AuthError(Exception):
+    """Stands in for the SDK's ``AuthenticationError`` (401).
+
+    Matched by class *name*, because the adapter imports the SDK lazily and must not
+    import it just to catch it.
+    """
+
+    __name__ = "AuthenticationError"
+
+
+class _Overloaded(Exception):
+    """A transient 529. Must NOT trip the breaker."""
+
+
+class _RaisingClient:
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.calls = 0
+        self.messages = self
+
+    def create(self, **_: object) -> object:
+        self.calls += 1
+        raise self._exc
+
+
+class TestAuthFailureStopsTheBatch:
+    """A rejected credential is not a per-posting problem.
+
+    Measured before the breaker existed: 12 postings produced 12 failed calls, so the
+    real corpus of 631 needing interpretation would produce 631 — each one re-proving
+    the same 401 on a run that already uses 786 s of its 900 s budget. Found by storing
+    a `claude setup-token` (`sk-ant-oat01-`) and watching it fail once per posting.
+    """
+
+    @staticmethod
+    def _postings(n: int) -> list[Posting]:
+        return [
+            _POSTING.model_copy(update={"url": f"https://x/{i}"}) for i in range(n)
+        ]
+
+    def test_a_401_stops_after_the_first_posting(self) -> None:
+        client = _RaisingClient(type("AuthenticationError", (Exception,), {})())
+        interp = ClaudeInterpreter(client=client)
+
+        out = interp.interpret_many(self._postings(12))
+
+        assert out == {}
+        assert client.calls == 1, "a rejected key must not be re-proven per posting"
+        assert interp.stats.failures == 1
+
+    def test_a_transient_error_does_not_stop_the_batch(self) -> None:
+        """The breaker must stay narrow: the next posting may well succeed."""
+        client = _RaisingClient(type("APIStatusError", (Exception,), {})())
+        interp = ClaudeInterpreter(client=client)
+
+        interp.interpret_many(self._postings(5))
+
+        assert client.calls == 5, "a transient failure is per-posting, not terminal"
+
+    def test_a_403_also_stops(self) -> None:
+        client = _RaisingClient(type("PermissionDeniedError", (Exception,), {})())
+        interp = ClaudeInterpreter(client=client)
+        interp.interpret_many(self._postings(6))
+        assert client.calls == 1
+
+    def test_the_breaker_is_per_instance_so_the_next_run_retries(self) -> None:
+        """Fixing the key must take effect on the next sweep with nothing to reset.
+
+        The cron builds a fresh interpreter each run and re-reads the parameter, so
+        the flag must not outlive the instance.
+        """
+        first = _RaisingClient(type("AuthenticationError", (Exception,), {})())
+        ClaudeInterpreter(client=first).interpret_many(self._postings(4))
+        assert first.calls == 1
+
+        second = _RaisingClient(type("AuthenticationError", (Exception,), {})())
+        ClaudeInterpreter(client=second).interpret_many(self._postings(4))
+        assert second.calls == 1, "a new instance must try again, not inherit the flag"

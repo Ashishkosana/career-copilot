@@ -179,6 +179,25 @@ def _locate(description: str, span: str) -> tuple[bool, bool]:
     return False, False
 
 
+def _is_auth_failure(exc: Exception) -> bool:
+    """Whether an exception means the credential itself is rejected.
+
+    Matched on class name rather than by importing the SDK's exception types: the SDK
+    is imported lazily so the package works without it installed, and importing it
+    here to catch it would undo that. The names are stable public API
+    (``AuthenticationError`` is 401, ``PermissionDeniedError`` is 403).
+
+    Deliberately narrow. A 429 or a 529 is transient and the *next* posting may well
+    succeed, so those must not trip the breaker — the failure this guards against is
+    the one that is identical for every posting in the batch.
+    """
+    return type(exc).__name__ in _AUTH_FAILURE_TYPES
+
+
+#: Rejected-credential exception names. 401 and 403 only.
+_AUTH_FAILURE_TYPES = frozenset({"AuthenticationError", "PermissionDeniedError"})
+
+
 class ClaudeInterpreter:
     """InterpreterPort backed by a hosted LLM, cached by posting id.
 
@@ -206,6 +225,9 @@ class ClaudeInterpreter:
     ) -> None:
         self._api_key = api_key
         self._model = model
+        #: Set once a 401/403 proves the credential is rejected, so the rest of the
+        #: batch is skipped instead of re-proving it per posting.
+        self._auth_failed = False
         self._store = store
         self._client = client
         self._max_description_chars = max_description_chars
@@ -287,6 +309,9 @@ class ClaudeInterpreter:
         client = self._get_client()
         if client is None:
             return None
+        if self._auth_failed:
+            # Set by a previous 401/403 in this same batch. See _auth_failed.
+            return None
 
         self._stats.calls += 1
         try:
@@ -318,6 +343,31 @@ class ClaudeInterpreter:
                     }
                 },
             )
+            if _is_auth_failure(exc):
+                # A rejected credential is not a per-posting problem, and retrying it
+                # 631 more times only spends the cron's remaining seconds discovering
+                # the same 401. Measured before this existed: 12 postings produced 12
+                # failed calls, so the real corpus would produce 631 — on a run that
+                # already uses 786 s of its 900 s budget.
+                #
+                # Scoped to the instance, not the process: the next run builds a new
+                # interpreter and re-reads the parameter, so fixing the key takes
+                # effect on the next sweep with nothing to reset by hand.
+                self._auth_failed = True
+                _LOG.error(
+                    "interpret_auth_failed_giving_up",
+                    extra={
+                        "extra_fields": {
+                            "parameter": self._secret_id,
+                            "remaining_skipped": True,
+                            "hint": (
+                                "the credential was rejected; a claude setup-token "
+                                "(sk-ant-oat01-) cannot call the Messages API — that "
+                                "needs a Console key (sk-ant-api03-)"
+                            ),
+                        }
+                    },
+                )
             return None
 
         self._record_usage(response)
