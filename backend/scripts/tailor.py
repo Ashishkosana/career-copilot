@@ -20,6 +20,7 @@ import argparse
 import re
 import sys
 import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 
 from copilot.adapters.ats import (
@@ -31,6 +32,7 @@ from copilot.adapters.ats import (
 )
 from copilot.domain.gap import GapReport, Variant, build_report
 from copilot.domain.posting import Posting
+from copilot.ports.postingsource import PostingSourcePort
 
 DEFAULT_RESUME = Path.home() / "projects" / "resumes" / "Ashish_Kosana_Resume.pdf"
 
@@ -63,7 +65,14 @@ def fetch_posting(url: str) -> Posting:
             "jobs.ashbyhq.com, jobs.lever.co"
         )
 
-    sources = {"greenhouse": GreenhouseSource, "ashby": AshbySource, "lever": LeverSource}
+    # Annotated rather than inferred: mypy reads a dict of three different classes
+    # as ``dict[str, object]``, and ``object`` has no ``fetch`` — so an entry that
+    # was not a posting source would type-check fine and fail at runtime.
+    sources: dict[str, Callable[[str], PostingSourcePort]] = {
+        "greenhouse": GreenhouseSource,
+        "ashby": AshbySource,
+        "lever": LeverSource,
+    }
     factory = sources.get(entry.ats)
     if factory is None:
         raise SystemExit(

@@ -24,6 +24,7 @@ These six are why.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,14 @@ from copilot.domain.tailoring import (
     validate,
     validate_strict,
 )
+
+#: The bullet library, keyed by id.
+Bullets = dict[str, Bullet]
+#: An attack: given the real bullets, return one rewritten bullet's text. Typed as
+#: a Callable rather than ``object`` so ``--strict`` checks the call sites — an
+#: attack list whose third element is not callable is a suite that silently
+#: asserts nothing.
+Attack = Callable[[Bullets], str]
 
 # tests/ -> backend/ -> career-copilot/ ; parents[2] is the repo root.
 CONTENT = Path(__file__).resolve().parents[2] / "private" / "resume" / "content.json"
@@ -70,11 +79,11 @@ def _bullets() -> dict[str, Bullet]:
 
 
 @pytest.fixture(scope="module")
-def bullets() -> dict[str, Bullet]:
+def bullets() -> Bullets:
     return _bullets()
 
 
-def _swap(bullets: dict[str, Bullet], bid: str, old: str, new: str) -> str:
+def _swap(bullets: Bullets, bid: str, old: str, new: str) -> str:
     text = bullets[bid].text
     assert old in text, f"{bid}: attack setup is stale, {old!r} not in the source"
     return text.replace(old, new, 1)
@@ -82,7 +91,7 @@ def _swap(bullets: dict[str, Bullet], bid: str, old: str, new: str) -> str:
 
 # --- attacks the validators DO catch ----------------------------------------
 # (id, bullet, builder) — builder takes the bullet map and returns the rewrite.
-BLOCKED: list[tuple[str, str, object]] = [
+BLOCKED: list[tuple[str, str, Attack]] = [
     ("A1-verb-and-noun-enlargement", "exp.crewtron.b2",
      lambda b: "Established the REST API platform secured with AWS Cognito, provisioned "
                "the backend as code with AWS CDK and scoped IAM, and automated "
@@ -119,7 +128,7 @@ BLOCKED: list[tuple[str, str, object]] = [
 
 # --- attacks that STILL PASS everything -------------------------------------
 # Each is one lowercase common word swapped for another. Documented, not fixed.
-KNOWN_UNCAUGHT: list[tuple[str, str, object, str]] = [
+KNOWN_UNCAUGHT: list[tuple[str, str, Attack, str]] = [
     ("A3-in-production", "exp.crewtron.b1",
      lambda b: _swap(b, "exp.crewtron.b1", "live crew map end to end",
                      "live crew map in production"),
@@ -148,7 +157,7 @@ KNOWN_UNCAUGHT: list[tuple[str, str, object, str]] = [
 ]
 
 # Honest rewrites that must never be flagged, or the validators are useless.
-CONTROLS: list[tuple[str, str, object]] = [
+CONTROLS: list[tuple[str, str, Attack]] = [
     ("clause-reorder", "exp.crewtron.b2",
      lambda b: "Designed REST APIs secured with AWS Cognito, automated merchant "
                "review-request outreach over email and SMS, and provisioned the backend "
@@ -159,20 +168,24 @@ CONTROLS: list[tuple[str, str, object]] = [
 ]
 
 
-def _run(bullets: dict[str, Bullet], bid: str, text: str, *, strict: bool) -> bool:
+def _run(bullets: Bullets, bid: str, text: str, *, strict: bool) -> bool:
     fn = validate_strict if strict else validate
     return fn([bullets[bid]], {bid: text}, released=RELEASED).ok
 
 
 class TestBlockedAttacks:
     @pytest.mark.parametrize(("name", "bid", "build"), BLOCKED, ids=[c[0] for c in BLOCKED])
-    def test_caught_by_v1_v10(self, bullets, name: str, bid: str, build) -> None:
+    def test_caught_by_v1_v10(
+        self, bullets: Bullets, name: str, bid: str, build: Attack
+    ) -> None:
         assert not _run(bullets, bid, build(bullets), strict=True), (
             f"{name} is no longer caught — a validator has regressed"
         )
 
     @pytest.mark.parametrize(("name", "bid", "build"), BLOCKED, ids=[c[0] for c in BLOCKED])
-    def test_all_of_them_passed_the_original_six(self, bullets, name, bid, build) -> None:
+    def test_all_of_them_passed_the_original_six(
+        self, bullets: Bullets, name: str, bid: str, build: Attack
+    ) -> None:
         """Documents why v7-v10 exist: every one of these got through v1-v6."""
         assert _run(bullets, bid, build(bullets), strict=False), (
             f"{name} was already caught by v1-v6 — the historical record is wrong"
@@ -186,7 +199,7 @@ class TestKnownUncaught:
         ("name", "bid", "build", "why"), KNOWN_UNCAUGHT, ids=[c[0] for c in KNOWN_UNCAUGHT]
     )
     def test_still_passes_and_therefore_needs_human_review(
-        self, bullets, name: str, bid: str, build, why: str
+        self, bullets: Bullets, name: str, bid: str, build: Attack, why: str
     ) -> None:
         assert _run(bullets, bid, build(bullets), strict=True), (
             f"{name} is now CAUGHT — promote it into BLOCKED and delete it from here"
@@ -199,14 +212,16 @@ class TestKnownUncaught:
 
 class TestControls:
     @pytest.mark.parametrize(("name", "bid", "build"), CONTROLS, ids=[c[0] for c in CONTROLS])
-    def test_honest_rewrites_are_not_flagged(self, bullets, name: str, bid: str, build) -> None:
+    def test_honest_rewrites_are_not_flagged(
+        self, bullets: Bullets, name: str, bid: str, build: Attack
+    ) -> None:
         assert _run(bullets, bid, build(bullets), strict=True), (
             f"{name} is a false positive — the validators reject an honest rewrite"
         )
 
 
 class TestCoverage:
-    def test_every_bullet_declares_what_validators_need(self, bullets) -> None:
+    def test_every_bullet_declares_what_validators_need(self, bullets: Bullets) -> None:
         for bullet in bullets.values():
             assert bullet.allowed_verbs, f"{bullet.id} has no verb ceiling"
             assert bullet.must_keep, f"{bullet.id} protects no text"
@@ -215,7 +230,7 @@ class TestCoverage:
                 f"{bullet.id}: its own first word {first_word!r} is not in its ceiling"
             )
 
-    def test_every_protected_string_is_really_in_its_source(self, bullets) -> None:
+    def test_every_protected_string_is_really_in_its_source(self, bullets: Bullets) -> None:
         for bullet in bullets.values():
             for protected in bullet.must_keep:
                 assert protected in bullet.text, f"{bullet.id}: {protected!r} not in source"

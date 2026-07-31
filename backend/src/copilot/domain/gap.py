@@ -243,3 +243,115 @@ def build_report(
         backend_signal=backend,
         frontend_signal=frontend,
     )
+
+
+# ---------------------------------------------------------------------------
+# Scoring. Deliberately separate from the gates: eligibility is pass/fail and is
+# never scored, because a clearance you cannot obtain is not a "worse fit" — it
+# is an impossibility, and averaging it into a number hides that.
+#
+# The number here is defensible for one reason: **the denominator comes from the
+# posting**, not from the candidate. The objection to competitor match scores was
+# that their denominators are user-editable — Careerflow concedes that ignoring a
+# suggested skill does not lower your score, which makes the number meaningless.
+# "Covers 9 of 13 requirements this posting names" is a real ratio.
+# ---------------------------------------------------------------------------
+
+class Tier(StrEnum):
+    """A named band. Greenhouse itself emits categories, never a percentage."""
+
+    EXACT = "exact match"
+    STRONG = "strong"
+    PARTIAL = "partial"
+    WEAK = "weak"
+    UNSCORED = "unscored"
+
+
+#: Component weights. Required coverage dominates because the strongest study on
+#: LLM screeners manufactures its pairs by adding and deleting *required*
+#: qualifications, and a single one flips the decision 82-87% of the time.
+W_REQUIRED = 60
+W_PREFERRED = 25
+W_LEVEL = 15
+
+_STRONG_AT = 0.80
+_PARTIAL_AT = 0.50
+
+#: A posting must name at least this many requirements before full coverage means
+#: anything. Without it, a posting whose description yielded exactly one detected
+#: requirement scores 100 and outranks a genuine 6-of-6 — small denominators
+#: manufacture certainty. Measured: 1/1 and 2/2 "exact matches" were the majority
+#: of the tier before this floor existed.
+MIN_EVIDENCE_FOR_EXACT = 3
+
+
+@dataclass(frozen=True)
+class Score:
+    """A score that shows its work. Never displayed as a bare number."""
+
+    total: int
+    required_covered: int
+    required_total: int
+    preferred_covered: int
+    preferred_total: int
+    level_confirmed: bool
+    tier: Tier
+
+    @property
+    def required_ratio(self) -> float:
+        return self.required_covered / self.required_total if self.required_total else 0.0
+
+    def explain(self) -> str:
+        parts = [f"covers {self.required_covered}/{self.required_total} required"]
+        if self.preferred_total:
+            parts.append(f"{self.preferred_covered}/{self.preferred_total} preferred")
+        parts.append("level confirmed" if self.level_confirmed else "level unverified")
+        return " · ".join(parts)
+
+
+def score_report(report: GapReport, *, level_confirmed: bool) -> Score:
+    """Score one already-eligible posting.
+
+    ``level_confirmed`` comes from the screening verdict: it is True only when the
+    band was decided from an explicit signal, not defaulted. 652 of 880 eligible
+    postings have no level marker at all, so treating "unknown" as confirmed would
+    inflate three quarters of the list.
+    """
+    req_total = len(report.have_required) + len(report.missing_required)
+    pref_total = len(report.have_preferred) + len(report.missing_preferred)
+
+    if not req_total and not pref_total:
+        # The posting names no technologies at all — roughly a third of real
+        # postings. Scoring it would invent a signal that is not there.
+        return Score(0, 0, 0, 0, 0, level_confirmed, Tier.UNSCORED)
+
+    req_ratio = len(report.have_required) / req_total if req_total else 0.0
+    # Shrink the required component when the posting barely stated anything, so a
+    # 1-of-1 cannot outscore a 6-of-6. Full weight only once there is real evidence.
+    evidence_factor = min(1.0, req_total / MIN_EVIDENCE_FOR_EXACT) if req_total else 0.0
+    pref_ratio = len(report.have_preferred) / pref_total if pref_total else 0.0
+
+    total = round(
+        W_REQUIRED * req_ratio * evidence_factor
+        + W_PREFERRED * pref_ratio
+        + W_LEVEL * (1.0 if level_confirmed else 0.0)
+    )
+
+    if req_total >= MIN_EVIDENCE_FOR_EXACT and req_ratio == 1.0 and level_confirmed:
+        tier = Tier.EXACT
+    elif req_ratio >= _STRONG_AT:
+        tier = Tier.STRONG
+    elif req_ratio >= _PARTIAL_AT:
+        tier = Tier.PARTIAL
+    else:
+        tier = Tier.WEAK
+
+    return Score(
+        total=total,
+        required_covered=len(report.have_required),
+        required_total=req_total,
+        preferred_covered=len(report.have_preferred),
+        preferred_total=pref_total,
+        level_confirmed=level_confirmed,
+        tier=tier,
+    )
