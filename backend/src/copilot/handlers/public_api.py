@@ -25,8 +25,22 @@ documented query parameters copied across and nothing else — no body, ever.
 
 **Read-only, structurally.** Anything that is not a ``GET`` on one of the four paths
 is refused before a handler runs, and this module never names ``record_applied`` or
-``mark_applied``. ``tests/test_public_api.py`` asserts both, plus that a full sweep
-of every route touches exactly one store method: ``open_postings``.
+``mark_applied``. ``tests/test_public_api.py`` asserts both, plus that a full sweep of
+every route touches exactly three store methods — ``screening_summary``,
+``screened_page`` and ``postings_by_id`` — and in particular that ``open_postings`` is
+not among them. That last one is not a purity check: reading the whole corpus per
+request is what made every one of these routes 504 in production, and the assertion
+exists so it cannot come back.
+
+**"Not screened yet" comes out as a state, not as a hang.** When the cron has not
+published a screening view, or the only one it published is too old to present as
+current, the upstream read answers 503 with ``corpus_not_screened`` or
+``screening_view_stale``. Those codes are re-stated here like any other error, so the
+page can render either as a sentence and a visitor can tell "nothing has been screened
+yet" from "the service is broken" — which was impossible when both were a 29-second
+timeout. They are deliberately *codes* rather than a field beside the error: an error
+body here is ``{"error": code}`` and nothing else, so a state that lives in the code
+needs no new allowlist entry and cannot widen this projection.
 
 **No description prose.** Republishing 234 companies' description text in bulk is a
 different act from quoting one sentence to justify a decision — and Workday's terms
@@ -70,14 +84,17 @@ subject, because the posting corpus is per-installation, not per-user (asserted 
 this module synthesises the constant :data:`PUBLIC_PRINCIPAL` to satisfy that gate.
 It is a label, not a credential, and it appears nowhere in a response.
 
-**Cost.** An open endpoint must not be able to run up a bill. Three brakes, two of
-them here: a page is capped at ``MAX_LIMIT`` rows, the screened index is built once
-per warm container (:class:`~copilot.handlers.worklist_api.IndexCache`), and every
-successful read carries ``Cache-Control: public, max-age=300`` so browsers and any CDN
-in front absorb repeats — errors are ``no-store``, because a cached 503 outlives the
-outage that caused it. The third brake is the request-rate throttle on the API Gateway
-stage, which is infrastructure, not code — this module cannot enforce it and does
-not pretend to.
+**Cost.** An open endpoint must not be able to run up a bill. Four brakes, three of
+them here: no read screens the corpus at all any more (a request reads one page of the
+materialised view, so the work per request no longer grows with the 47,538-posting
+corpus), a page is capped at ``MAX_LIMIT`` rows, and every successful read carries
+``Cache-Control: public, max-age=300`` so browsers and any CDN in front absorb repeats
+— errors are ``no-store``, because a cached 503 outlives the outage that caused it, and
+a cached "not screened yet" would outlive the cron run that fixes it. The summary every
+read starts from is held for the life of a warm container
+(:class:`~copilot.handlers.worklist_api.SummaryCache`). The fourth brake is the
+request-rate throttle on the API Gateway stage, which is infrastructure, not code —
+this module cannot enforce it and does not pretend to.
 """
 from __future__ import annotations
 
@@ -91,7 +108,7 @@ from copilot.handlers import worklist_api
 from copilot.handlers.worklist_api import (
     DESC_AVAILABLE,
     QUOTE_MAX_CHARS,
-    IndexCache,
+    SummaryCache,
     build_store,
     load_resume_text,
 )
@@ -111,9 +128,10 @@ CORS_HEADERS: Final[dict[str, str]] = {
     "Access-Control-Allow-Headers": "Content-Type",
 }
 
-#: Matches ``IndexCache``'s TTL: the response is served from an index that may
-#: already be five minutes old, so promising fresher data than that would be a lie,
-#: and promising less would spend money re-screening for no one's benefit.
+#: Matches :data:`~copilot.handlers.worklist_api.SUMMARY_TTL_SECONDS`: a response can
+#: be served from a summary a warm container read five minutes ago, so promising fresher
+#: data than that would be a lie. Promising less would spend a Lambda invocation per
+#: reload to re-read one item nobody's answer depends on.
 CACHE_MAX_AGE_SECONDS: Final = 300
 
 #: The synthetic principal handed to the authenticated read path to satisfy its
@@ -616,7 +634,7 @@ def route(
     *,
     resume_text: str = "",
     now: datetime | None = None,
-    cache: IndexCache | None = None,
+    cache: SummaryCache | None = None,
 ) -> dict[str, Any]:
     """Dispatch one unauthenticated request. Split from :func:`handler` for tests.
 
@@ -660,7 +678,7 @@ def _dispatch(
     inner_path: str,
     resume_text: str,
     now: datetime | None,
-    cache: IndexCache | None,
+    cache: SummaryCache | None,
 ) -> dict[str, Any] | None:
     """The read table: four paths, four projections. ``None`` means no route matched.
 
@@ -721,9 +739,10 @@ def _sanitised(
     return _response(_OK, sanitise(body))
 
 
-#: Container-scoped, like the authenticated reader's: an open endpoint that
-#: re-screened 25,294 postings per request would be a bill waiting to happen.
-_CACHE: Final = IndexCache()
+#: Container-scoped, like the authenticated reader's. It holds one summary item now
+#: rather than a screening pass over 25,294 postings — that pass is what an open
+#: endpoint could never afford, and it is why it no longer happens on this path.
+_CACHE: Final = SummaryCache()
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
