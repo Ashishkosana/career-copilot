@@ -1,10 +1,57 @@
+# --- Python -------------------------------------------------------------
 __pycache__/
 *.pyc
 .venv/
 *.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Secrets ------------------------------------------------------------
+.env
+.env.*
+!.env.example
 credentials.json
 token.json
+
+# --- Private content ----------------------------------------------------
+# Everything under private/ is personal: the resume template, the tailoring
+# prompts, and the application answer library (work authorisation, salary,
+# EEO responses). The repo is public; this is not. See private.example/ for
+# placeholder versions that keep the code runnable by anyone.
+private/
+
+# --- Generated data -----------------------------------------------------
+# postings.db reaches ~150 MB with full descriptions, over GitHub's 100 MB
+# hard limit. It is a cache — it can always be rebuilt by refetching.
+*.db
+*.db-wal
+*.db-shm
+data/postings.*
+
+# Fetched corpora and eval snapshots: large, reproducible, and full of other
+# people's job descriptions.
+corpus*.json
+data/corpus*.json
+scorer-eval/corpus*.json
+
+# Build output
 briefing.md
-.env
+*.staged.pdf
+data/screens/
+
+# --- Flutter ------------------------------------------------------------
+app/build/
+app/.dart_tool/
+app/ios/Pods/
+app/android/.gradle/
+*.dill
+*.dill.track.dill
+
+# --- Node / CDK ---------------------------------------------------------
+node_modules/
+infra/build/
+infra/cdk.out/
+
+# --- OS -----------------------------------------------------------------
 .DS_Store
-.venv/
