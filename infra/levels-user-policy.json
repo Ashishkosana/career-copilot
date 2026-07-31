@@ -1,0 +1,18 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadPostingsWriteLevels",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:Query",
+        "dynamodb:GetItem",
+        "dynamodb:UpdateItem"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:us-east-1:921888034384:table/career-copilot-postings",
+        "arn:aws:dynamodb:us-east-1:921888034384:table/career-copilot-postings/index/*"
+      ]
+    }
+  ]
+}

@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>career-copilot — worklist</title>
+<!-- An inline SVG icon, not a file. Every load 404'd on /favicon.ico, and this page is
+     one self-contained file by design: a data URI is bytes already here, so it costs no
+     request and cannot break when the network does. build_ui.py's asset check allows a
+     data: href and still fails the build on any other one. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Crect%20width='32'%20height='32'%20rx='7'%20fill='%231c5d4a'/%3E%3Cpath%20d='M9%2016.6l4.9%204.9L23%2010.4'%20fill='none'%20stroke='%23fff'%20stroke-width='3.6'%20stroke-linecap='round'%20stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
 /* ── tokens ───────────────────────────────────────────────────────────── */
 :root{
@@ -92,6 +97,14 @@ nav button[aria-current="page"]{background:var(--ink);color:#fff;font-weight:550
 .chip[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:#fff;font-weight:550}
 .chip:disabled{opacity:.5;cursor:not-allowed}
 .chip .n{opacity:.72;margin-left:5px;font-size:11.5px}
+/* The default-filter notice. It sits inside the filter bar, above the chips, because a
+   filtered default that is not announced where the filter lives is the same lie as not
+   announcing it at all. Tinted *and* worded: never colour alone. */
+.notice{border:1px solid var(--accent-line);background:var(--accent-soft);border-radius:8px;
+  padding:10px 12px;margin:0 0 10px;font-size:13px;color:var(--ink-2)}
+.notice b{color:var(--ink)}
+.notice-acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.notice-acts .chip{background:var(--surface)}
 .search{display:flex;gap:8px;align-items:center;padding:8px 0 2px}
 .search input{flex:1;min-width:0;font:inherit;font-size:13.5px;padding:7px 11px;
   border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--surface);
@@ -286,6 +299,10 @@ footer p{margin:0 0 8px;max-width:80ch}
   <p>Internships and co-ops are listed in their own section and are never counted as
   full-time openings. They are kept apart because they are a different job with a
   different offer — and kept at all because some new-grad pipelines run through them.</p>
+  <p>“New” here means new to this list: the date this system first saw a posting, not the
+  date the employer published it. Both dates are shown, and they routinely disagree by
+  months — a company added to the watchlist today arrives with all of its still-open roles.</p>
+
   <p>There is deliberately no match percentage. A role is either eligible or it is not —
   eligibility is pass/fail and is never scored — and the fit score is only ever shown as the
   set of things the posting named, counted against the posting's own list.</p>
@@ -330,6 +347,22 @@ footer p{margin:0 0 8px;max-width:80ch}
    * Age is shown, never hidden. There is no default age window. The user wants a
      role that has been open since February — or since 2013 — to stay findable, so
      age is a visible column and an opt-in filter with an "older than" direction.
+
+   * Two dates, two different questions. ``postedAt`` is the employer's — when the board
+     says the role went up, spanning 1 to 4,572 days on this corpus. ``firstSeen`` is
+     ours — when this pipeline first saw the posting. Add a company to the watchlist
+     today and it delivers 200 months-old-but-open roles, every one of them new *to
+     this list*: the "posted in the last 24 hours" block read 5 on a morning the cron
+     reported 358 new. So "new to this list" is its own section and its own filter,
+     reading ``firstSeen``, and the age block keeps answering the other question.
+
+   * The landing state is filtered, and says so where the filter lives. 2,207 of 2,569
+     eligible roles carry no verifiable level, so an unfiltered default is a wall of
+     unlabelled rows. ``defaultFilters`` opens on entry level; the filter bar carries a
+     notice naming what that hides and two one-click ways out; and the heading changes
+     with it, because a filtered list titled "All full-time roles" is worse than the
+     wall it replaced. Nothing is dropped — the rows are one click away, and the
+     "eligible in all" count next to the heading never moves.
    =========================================================================== */
 
 const BOOT = __BOOT__;
@@ -465,6 +498,18 @@ const AGE_BANDS = [
 ];
 const AGE_BY_KEY = new Map(AGE_BANDS.map(b => [b.key, b]));
 
+/* "New to this list" bands, over ``firstSeen``. Deliberately *not* the age bands: those
+   map to ``postedAfter``/``postedBefore``, which are the employer's date and are the one
+   thing this dimension is not. There is no server parameter for first-seen — the read
+   API serves one keyset page ordered by posted date and nothing else — so these are
+   applied in the browser, and every count drawn from them says over what. */
+const NEW_BANDS = [
+  { key: 'any', label: 'Any',                    mode: 'any' },
+  { key: 'n1',  label: 'New since yesterday',    mode: 'within', days: 1 },
+  { key: 'n7',  label: 'New in the last 7 days', mode: 'within', days: 7 },
+];
+const NEW_BY_KEY = new Map(NEW_BANDS.map(b => [b.key, b]));
+
 /* ===========================================================================
    Filters. One object, two consumers: the API turns it into a query string, the
    snapshot turns it into a predicate. Both are written from the same fields so
@@ -472,7 +517,41 @@ const AGE_BY_KEY = new Map(AGE_BANDS.map(b => [b.key, b]));
    =========================================================================== */
 
 function emptyFilters(){
-  return { tiers: [], levels: [], sources: [], age: 'any', q: '' };
+  return { tiers: [], levels: [], sources: [], age: 'any', newTo: 'any', q: '' };
+}
+
+/** What the page opens on, and why it is not ``emptyFilters``.
+
+    2,207 of the 2,569 eligible roles read "level unverified", so the unfiltered list is
+    a wall of unlabelled rows and the one thing the user wants — entry-level openings —
+    is buried in it. Clicking `Entry` yields exactly what he is after (New Grad,
+    Associate Developer I, Junior Software Engineer, Software Engineer I), so that is the
+    landing state.
+
+    **Why ``entry`` alone and not "entry plus unverified, senior excluded".** Because the
+    second one is not a filter at all here. The screen has already removed mid and senior
+    through the ``wrong_seniority_band`` gate, so every kept role is ``entry`` or
+    ``unknown`` — the facets on this corpus are exactly ``{unknown, entry}`` — and
+    "entry + unknown, senior excluded" therefore selects 100% of the list. It would be a
+    filter that changes nothing, announced as though it did, which is the worst of the
+    three options. So: ``entry``, with the 2,207 one click away and the notice above the
+    chips naming them, because they are *probably* junior and merely unlabelled and
+    hiding them silently would be the real bug.
+
+    Kept separate from ``emptyFilters`` rather than folded into it, and this matters:
+    ``askFor`` and the internships pager both start from ``emptyFilters()``, so a default
+    baked in there would silently narrow the "posted in the last 24 hours" count and
+    filter the internships section — whose rows are all level ``intern`` — down to zero
+    rows under a heading claiming 48. */
+function defaultFilters(){
+  return Object.assign(emptyFilters(), { levels: ['entry'] });
+}
+
+/** Whether the filter set is exactly the landing state, so the notice can say so. */
+function isDefaultFilters(f){
+  return f.levels.length === 1 && f.levels[0] === 'entry'
+    && f.tiers.length === 0 && f.sources.length === 0
+    && f.age === 'any' && f.newTo === 'any' && f.q.trim() === '';
 }
 
 function ageWindow(key){
@@ -485,7 +564,34 @@ function ageWindow(key){
 
 function filtersActive(f){
   return f.tiers.length > 0 || f.levels.length > 0 || f.sources.length > 0
-    || f.age !== 'any' || f.q.trim() !== '';
+    || f.age !== 'any' || f.newTo !== 'any' || f.q.trim() !== '';
+}
+
+/** The two filters the API cannot express, so the two whose counts need a caveat.
+
+    Text search and the first-seen window are both applied in the browser: the API has no
+    text parameter, and no first-seen parameter either. On the snapshot path that costs
+    nothing — the whole set is in memory — but on the API path they narrow *the rows
+    loaded so far*, while ``matched`` still describes the server-side filter set. The page
+    says which is which rather than presenting one number as the other. */
+function browserSideFilters(f){
+  return (f.newTo !== 'any' ? 1 : 0) + (f.q.trim() !== '' ? 1 : 0) > 0;
+}
+
+/** Whether one card was first seen by *this system* inside the band's window.
+
+    Null is out whenever a window is on, and that is not the same rule as a missing
+    ``postedAt``: an undated posting has a date we were not told, whereas a null
+    ``firstSeen`` means this page cannot say when it arrived — so claiming it as new would
+    be inventing the one fact the section exists to report. The whole-list "not available
+    until the next run" state above the rows is what makes that honest rather than silent:
+    when every stamp is null, the section says so instead of showing an empty list. */
+function passesFirstSeen(item, f){
+  const band = NEW_BY_KEY.get(f.newTo);
+  if (!band || band.mode === 'any') return true;
+  const seen = item.firstSeen ? Date.parse(item.firstSeen) : NaN;
+  if (Number.isNaN(seen)) return false;
+  return seen >= Date.now() - band.days * DAY_MS;
 }
 
 /** Free-text match. Client-side in both paths: the API has no text search. */
@@ -519,6 +625,10 @@ function passesFilters(item, f){
     const tier = item.score ? item.score.tier : null;
     if (tier === null || !f.tiers.includes(tier)) return false;
   }
+  // Both of these have no server-side equivalent, so they are applied here for the
+  // snapshot — where this predicate *is* the query — and again in ``visibleRows`` for
+  // the API path. Idempotent either way, and one predicate rather than two to drift.
+  if (!passesFirstSeen(item, f)) return false;
   return passesQuery(item, f.q);
 }
 
@@ -654,6 +764,11 @@ function apiParams(filters, cursor, limit){
   // Sent explicitly rather than left to the server default, so the wire says the
   // same thing the chip says.
   params.includeUndated = (after || before) ? 'false' : 'true';
+  // ``filters.newTo`` and ``filters.q`` are deliberately absent. Neither route takes a
+  // parameter for them, and an unknown parameter is *ignored* rather than refused — so
+  // sending a hopeful ``firstSeenAfter`` would return the unfiltered page and the section
+  // above would label 100 arbitrary rows as new. They are applied in the browser instead,
+  // by ``visibleRows``, and every count taken from them says over what it was taken.
   if (cursor) params.cursor = cursor;
   return params;
 }
@@ -864,7 +979,8 @@ const reasonText = code => REASON_TEXT[code]
 
 const state = {
   source: null,
-  filters: emptyFilters(),
+  // Filtered on arrival, on purpose and out loud — see ``defaultFilters``.
+  filters: defaultFilters(),
   rows: [],
   matched: 0,
   cursor: null,
@@ -1103,13 +1219,15 @@ function fillDetail(detail, item, opts){
   const alreadyRecorded = state.applied.get(item.id) === 'recorded';
   const applied = el('button', 'btn btn-2',
     alreadyRecorded ? 'Recorded' : 'Record that I applied');
-  if (alreadyRecorded) applied.disabled = true;
-  else if (!state.source.canRecordApplied) {
-    applied.disabled = true;
-    applied.title = 'Recording needs the API; this page is reading the built-in snapshot.';
-  }
+  const blocked = !alreadyRecorded && !state.source.canRecordApplied;
+  if (alreadyRecorded || blocked) applied.disabled = true;
+  if (blocked) applied.title = cannotRecordWhy();
   const appliedNote = el('span', 'note',
-    alreadyRecorded ? 'recorded earlier in this session — nothing was submitted anywhere' : '');
+    alreadyRecorded ? 'recorded earlier in this session — nothing was submitted anywhere'
+      // Shown as text and not only as a ``title``: a disabled button's tooltip is
+      // unreachable by keyboard, ignored by most screen readers, and invisible on touch —
+      // so the reason would be hidden from exactly the people who need it.
+      : (blocked ? cannotRecordWhy() : ''));
   applied.addEventListener('click', async () => {
     applied.disabled = true;
     appliedNote.textContent = 'recording…';
@@ -1136,6 +1254,32 @@ function fillDetail(detail, item, opts){
   });
   actions.append(dismiss);
   detail.append(actions);
+}
+
+/** Why "Record that I applied" is disabled — and there are two reasons, not one.
+
+    This used to be a single string: "Recording needs the API; this page is reading the
+    built-in snapshot." It was set unconditionally whenever ``canRecordApplied`` was
+    false, and on the *published* build that flag is false because ``apiPublic`` is true —
+    so the live site, reading the public API perfectly well, told every visitor it was on
+    a snapshot. Two different states collapsed into one sentence, and the sentence was
+    false in the state that ships.
+
+    Being disabled is correct in both. Recording needs an authenticated ``POST /applied``
+    that the public route does not expose at all, and the snapshot has nothing to write
+    to. What was wrong was the explanation, so each state gets its own true one — and
+    neither implies the visitor should do something about it, because on a public page
+    there is nothing to do. */
+function cannotRecordWhy(){
+  if (state.source.kind === 'api') {
+    return 'Reading is public here; recording is not. Marking a role as applied writes to '
+      + 'the private, signed-in API, and this page reads the read-only public route — '
+      + 'which roles were applied to is deliberately not published. Nothing is broken and '
+      + 'there is nothing to fix from here: the button is off by design on the public page.';
+  }
+  return 'Nothing can be recorded against the built-in snapshot — there is no live API in '
+    + 'this session to write to, and the banner at the top of the page says why. The link '
+    + 'to the posting still works; only the bookkeeping is unavailable.';
 }
 
 /** The description, or an honest account of why there is none.
@@ -1212,6 +1356,12 @@ function renderToday(){
   const view = document.getElementById('view-today');
   clear(view);
 
+  // First on the page, because it is the question this site is opened to answer: what
+  // was not here yesterday. It reads ``firstSeen``; the block under it reads ``postedAt``
+  // and answers the employer's version of the same question.
+  const newto = el('div');
+  newto.id = 'newto';
+  view.append(newto);
   const fresh = el('div');
   fresh.id = 'fresh';
   view.append(fresh);
@@ -1225,12 +1375,18 @@ function renderToday(){
   view.append(interns);
 
   const head = el('div', 'section-head');
-  head.append(el('h2', null, 'All full-time roles'));
+  const heading = el('h2', null, worklistHeading());
+  heading.id = 'list-heading';
+  head.append(heading);
   const count = el('span', 'count');
   count.id = 'list-count';
   count.setAttribute('aria-live', 'polite');
   head.append(count);
   view.append(head);
+  // The snapshot holds every row it will ever hold, so whether it carries first-seen
+  // stamps is knowable before a single request — and the section below must not have to
+  // guess. On the API path the answer arrives with the first page instead.
+  if (state.source.kind === 'snapshot') noteFirstSeen(SNAP.items);
   view.append(filterBar());
 
   const list = el('div', 'list');
@@ -1244,7 +1400,25 @@ function renderToday(){
   // The main list first; the two summary sections after, so on the API path the
   // index is already warm and they are answered from cache rather than each
   // triggering their own screening pass.
-  reload().then(() => { fillFresh(fresh); fillExact(exact); fillInternships(interns); });
+  reload().then(() => {
+    fillNew(newto); fillFresh(fresh); fillExact(exact); fillInternships(interns);
+  });
+}
+
+/** The worklist's own heading, which has to move with the filters.
+
+    A filtered list titled "All full-time roles" is the failure this page was one line
+    away from shipping: the landing state hides 2,207 unverified roles, and a heading that
+    claimed otherwise would make the site quietly wrong rather than usefully narrow. */
+function worklistHeading(){
+  if (isDefaultFilters(state.filters)) return 'Entry-level roles';
+  if (filtersActive(state.filters)) return 'Full-time roles, filtered';
+  return 'All full-time roles';
+}
+
+function renderHeading(){
+  const node = document.getElementById('list-heading');
+  if (node) node.textContent = worklistHeading();
 }
 
 /** Ask whichever source is live one narrow question and hand back its count.
@@ -1260,12 +1434,138 @@ function askFor(overrides, limit){
   });
 }
 
-/** "Posted in the last 24 hours", which is *not* "new to this list".
+/* ── new to this list ──────────────────────────────────────────────────── */
 
-    The old build claimed the latter. It cannot be claimed from this API: a card
-    carries ``postedAt`` and no first-seen timestamp, so a posting the pipeline saw
-    for the first time this morning is indistinguishable from one it has held for a
-    month. Saying the narrower true thing instead. */
+/** Does the data in play carry first-seen stamps at all: 'unknown' | 'present' | 'absent'.
+
+    ``absent`` is a real, expected, temporary state and not an error. The published
+    screening view predates ``firstSeen``, so until the next cron pass every card reads
+    null — and a section that answered that with an empty list would be claiming "nothing
+    is new", which is the opposite fact and looks exactly like broken software. So the
+    state is tracked explicitly, the section says "not available until the next run", and
+    the filter chips are disabled rather than offering a filter that can only return zero.
+
+    Never flips back from ``present``: one page of nulls after a page with stamps means
+    those rows are unstamped, not that the field vanished. */
+let firstSeenState = 'unknown';
+
+/** Learn from a page of cards whether first-seen stamps are on the wire.
+
+    Redraws the filter bar itself when the answer changes, because every caller that learns
+    this is a caller that would otherwise have to remember to — and the bar is where the
+    consequence shows, as an enabled or disabled chip. Harmless before the bar exists:
+    ``renderFilterBar`` returns when there is nothing to draw into. */
+function noteFirstSeen(items){
+  if (firstSeenState === 'present' || !items || !items.length) return;
+  const was = firstSeenState;
+  firstSeenState = items.some(item => typeof item.firstSeen === 'string' && item.firstSeen)
+    ? 'present' : 'absent';
+  if (firstSeenState !== was) refreshFilterBar();
+}
+
+/** "New to this list" — the section, reading ``firstSeen``.
+
+    **Why this exists and the block below it is not enough.** The cron reported 358 new
+    and 500 closed on a morning when the "posted in the last 24 hours" block read 5,
+    because that block reads the *employer's* date. Both numbers are true and they answer
+    different questions, and the one the site is opened for is this one.
+
+    **Why the count is honest rather than round.** There is no first-seen parameter on the
+    read API — it serves one keyset page ordered by posted date, and that O(page) property
+    is load-bearing, it is why the route stopped 504ing — so on the live path this section
+    scans one page and says so, and the main list checks the rest as it pages. On the
+    snapshot path the whole set is in memory, so the number is exact and the copy says
+    that instead. What it never does is print a scan of 100 rows as though it were 2,569. */
+const NEW_PREVIEW = 8;
+
+async function fillNew(host){
+  clear(host);
+  host.append(el('div', 'eyebrow', 'New to this list — first seen in the last 24 hours'));
+  const zero = el('div', 'zero');
+  host.append(zero);
+
+  let page;
+  try {
+    page = await askFor({ newTo: 'n1' }, state.source.pageSize);
+  } catch (err) {
+    zero.append(el('div', 'note', 'Could not work out what is new: ' + err.message));
+    return;
+  }
+  // On the API path this page comes back unfiltered — ``apiParams`` sends no first-seen
+  // parameter, deliberately — so the same request is both the availability probe and the
+  // scan. On the snapshot path ``passesFilters`` already applied the window.
+  noteFirstSeen(page.items);
+  const exactCount = state.source.kind === 'snapshot';
+  const rows = page.items.filter(item => passesFirstSeen(item, { newTo: 'n1' }))
+    .filter(item => !state.hidden.has(item.id));
+  const scanned = page.items.length;
+  const count = exactCount ? page.matched : rows.length;
+
+  if (firstSeenState !== 'present') {
+    zero.append(el('div', 'zero-lead', 'Not available until the next run.'));
+    const body = el('div', 'zero-body');
+    body.innerHTML = '<b>Nothing this page has read carries a first-seen stamp yet.</b> '
+      + 'This pipeline records when it first saw each posting — that, and not the '
+      + 'employer’s posted date, is what “new” means here — but the published screening '
+      + 'view predates the field, so the number fills in after the next morning pass. '
+      + 'No role is missing from the list below; only this count is. The block under this '
+      + 'one reads the employer’s date and is unaffected.';
+    zero.append(body);
+    return;
+  }
+
+  zero.append(el('div', 'zero-n', fmt(count)));
+  zero.append(el('div', 'zero-lead', count
+    ? 'Roles this system saw for the first time in the last day.'
+    : 'Nothing new arrived in this list since yesterday.'));
+  const body = el('div', 'zero-body');
+  body.innerHTML = '<b>New here, not newly posted.</b> The stamp is when this pipeline '
+    + 'first saw the posting, not when the employer published it. Add a company to the '
+    + 'watchlist and it delivers months-old-but-open roles, every one of them new to this '
+    + 'list — which is why the block below, counting the employer’s own date, gives a '
+    + 'different and equally true number. Counted across every eligible role, entry level '
+    + 'or level unverified, not only the ones the filtered list further down shows.';
+  zero.append(body);
+  zero.append(el('div', 'note', exactCount
+    ? 'Exact: this snapshot holds every eligible row, so there is nothing left to check.'
+    : 'Checked over the ' + fmt(scanned) + ' most recently posted roles, in one request. '
+      + 'The read API serves one page at a time ordered by the employer’s date and has no '
+      + 'first-seen filter, so this is a floor and not the total — the rest are checked as '
+      + 'you page the list below with this filter on.'));
+
+  if (rows.length) {
+    const list = el('div', 'list');
+    rows.slice(0, NEW_PREVIEW).forEach(item => list.append(buildRow(item)));
+    host.append(list);
+  }
+  const more = el('button', 'more');
+  more.innerHTML = rows.length > NEW_PREVIEW
+    ? 'Show all <b>' + fmt(count) + '</b> new-to-this-list roles in the list below'
+    : 'Filter the list below to what is new to this list';
+  more.addEventListener('click', () => {
+    // Every other filter is dropped, not merged: the entry-level default would silently
+    // narrow a count this section just published across all levels, and "358 new" turning
+    // into 41 rows on click is the kind of arithmetic that makes a page look broken.
+    state.filters = Object.assign(emptyFilters(), { newTo: 'n1' });
+    renderFilterBar();
+    reload();
+    const rows = document.getElementById('rows');
+    if (rows && typeof rows.scrollIntoView === 'function') {
+      rows.scrollIntoView({ block: 'start' });
+    }
+  });
+  host.append(more);
+}
+
+/** "Posted in the last 24 hours" — the *employer's* date, which is a different question
+    from "new to this list".
+
+    Both are on the page now, adjacent and labelled, because the gap between them is the
+    interesting part: this block read 5 on a morning the pipeline first saw 358 postings.
+    It used to be the only one of the two the page could show — a card carried ``postedAt``
+    and no first-seen stamp — so the honest thing was to claim the narrower fact. With
+    ``firstSeen`` on the card, ``fillNew`` above claims the other one, and this block goes
+    on answering exactly what it always did. */
 async function fillFresh(host){
   clear(host);
   host.append(el('div', 'eyebrow', 'Posted in the last 24 hours'));
@@ -1606,11 +1906,89 @@ function toggleIn(list, value){
   if (at === -1) list.push(value); else list.splice(at, 1);
 }
 
+/** Redraw the bar when something outside it changed the answers it shows.
+
+    Two guards, both learned the hard way in this file's neighbours: never while the
+    visitor is inside the bar, because ``renderFilterBar`` rebuilds the search input from
+    ``state.filters.q`` and the 180 ms debounce means a fresh keystroke is not in state
+    yet — it would be typed and then silently thrown away. */
+function refreshFilterBar(){
+  const focused = document.activeElement;
+  if (focused && focused.closest && focused.closest('#filter-bar')) return;
+  renderFilterBar();
+}
+
+/** What the landing state hides, said where the filter that hides it lives.
+
+    The page opens filtered — see ``defaultFilters`` — and a filtered default that is not
+    announced is worse than the unusable wall it replaced, because the visitor cannot tell
+    a short list from a narrow one. So: what is on, what it excludes, the number it
+    excludes, and two one-click ways out. The number comes from ``funnel.needsLevelCheck``,
+    which both sources carry, rather than from the facets, which the live path does not
+    have — a count that silently disappeared on the published build would defeat the
+    entire point of saying it. */
+function levelNotice(){
+  const box = el('div', 'notice');
+  const funnel = state.source.funnel || {};
+  const unverified = funnel.needsLevelCheck;
+  const eligible = state.source.eligibleTotal;
+
+  if (!isDefaultFilters(state.filters)) {
+    if (state.filters.levels.length === 0 || state.filters.levels.includes('unknown')) {
+      box.innerHTML = '<b>Every level is showing, including unverified.</b> “Level '
+        + 'unverified” means nothing in the title or the description states one: the role '
+        + 'may be a new-grad opening or may want ten years, and there is no way to tell '
+        + 'from the listing.';
+    } else {
+      box.innerHTML = '<b>A filter is on.</b> The count beside the heading says how many '
+        + 'roles match it, out of every eligible role.';
+    }
+    const acts = el('div', 'notice-acts');
+    const back = el('button', 'chip', 'Back to entry level only');
+    back.addEventListener('click', () => {
+      state.filters = defaultFilters();
+      renderFilterBar();
+      reload();
+    });
+    acts.append(back);
+    box.append(acts);
+    return box;
+  }
+
+  box.innerHTML = '<b>A filter is on by default: entry level only.</b> '
+    + (unverified == null ? 'The roles whose level this pipeline could not verify are '
+        + 'hidden by it'
+      : 'That hides ' + fmt(unverified) + ' of the '
+        + (eligible ? fmt(eligible) + ' eligible roles' : 'eligible roles')
+        + ' whose level this pipeline could not verify')
+    + ' — nothing is dropped, and some of them are junior openings that simply never said '
+    + 'so. Mid and senior roles are not in this list at all; the screen removed them '
+    + 'before this page saw them.';
+  const acts = el('div', 'notice-acts');
+  const withUnknown = el('button', 'chip', unverified == null
+    ? 'Add the unverified ones' : 'Add the ' + fmt(unverified) + ' unverified');
+  withUnknown.addEventListener('click', () => {
+    state.filters.levels = ['entry', 'unknown'];
+    renderFilterBar();
+    reload();
+  });
+  const clearAll = el('button', 'chip', 'Show every role, unfiltered');
+  clearAll.addEventListener('click', () => {
+    state.filters = emptyFilters();
+    renderFilterBar();
+    reload();
+  });
+  acts.append(withUnknown, clearAll);
+  box.append(acts);
+  return box;
+}
+
 function renderFilterBar(host){
   const bar = host || document.getElementById('filter-bar');
   if (!bar) return;
   clear(bar);
   const scoring = state.source.scoring;
+  bar.append(levelNotice());
 
   const rowFor = (label, chips) => {
     const row = el('div', 'frow');
@@ -1647,6 +2025,26 @@ function renderFilterBar(host){
     band.label, ageBandCount(band),
     state.filters.age === band.key,
     () => { state.filters.age = band.key; renderFilterBar(); reload(); }))));
+
+  // The one row whose availability depends on the *data* rather than on the résumé:
+  // ``firstSeen`` is null on every card until the next cron pass republishes the view,
+  // and a filter that can only ever return nothing is worse than a disabled one.
+  const unstamped = firstSeenState === 'absent';
+  const newRow = rowFor('New to us', NEW_BANDS.map(band => {
+    const off = unstamped && band.mode !== 'any';
+    const chip = chipFor(band.label, newBandCount(band), state.filters.newTo === band.key,
+      () => { state.filters.newTo = band.key; renderFilterBar(); reload(); }, off);
+    if (off) {
+      chip.title = 'These rows carry no first-seen stamp yet — see “New to this list” at '
+        + 'the top of the page.';
+    }
+    return chip;
+  }));
+  if (state.filters.newTo !== 'any' && state.source.kind === 'api') {
+    newRow.append(el('span', 'search-note',
+      'first-seen filtering happens in the browser, over the rows loaded so far'));
+  }
+  bar.append(newRow);
 
   const search = el('div', 'search');
   const input = el('input');
@@ -1691,6 +2089,25 @@ function renderFilterBar(host){
     foot.append(reset);
   }
   bar.append(foot);
+  // Every filter change lands here, so the heading is updated here rather than at each
+  // call site — one of which would eventually be forgotten, and the heading is the label
+  // that stops a filtered list from reading as the whole list.
+  renderHeading();
+}
+
+/** Count for one "new to us" chip, from the snapshot, when the snapshot is the source.
+
+    Null on the API path for the same reason every other facet count is: the number would
+    describe the baked snapshot while the rows came from the live corpus. There is no
+    corpus-wide first-seen count on the wire at all, so a chip number there would be an
+    invention rather than merely stale. */
+function newBandCount(band){
+  if (!state.source.facets) return null;
+  let n = 0;
+  for (const item of SNAP.items) {
+    if (passesFirstSeen(item, { newTo: band.key })) n += 1;
+  }
+  return n;
 }
 
 /** Count for one age chip, from the snapshot, when the snapshot is the source. */
@@ -1747,6 +2164,7 @@ async function loadMore(){
       filters: state.filters, cursor: state.cursor, limit: state.source.pageSize,
     });
     if (mine !== generation) return;   // answered a question we are no longer asking
+    noteFirstSeen(page.items);
     state.rows = state.rows.concat(page.items.filter(item => !state.hidden.has(item.id)));
     state.matched = page.matched;
     state.cursor = page.nextCursor;
@@ -1763,7 +2181,8 @@ async function loadMore(){
 
 function visibleRows(){
   let rows = state.rows.filter(item => !state.hidden.has(item.id)
-    && passesQuery(item, state.filters.q));
+    && passesQuery(item, state.filters.q)
+    && passesFirstSeen(item, state.filters));
   if (state.sortByFit) {
     // A copy, so the arrival order from the source is never mutated.
     rows = rows.slice().sort((a, b) => {
@@ -1808,10 +2227,16 @@ function renderRows(){
   const empty = list.querySelector('.empty');
   if (empty) empty.remove();
   if (!rows.length && !state.loading) {
+    // Which fix to suggest depends on which filter is the likely cause, and with a
+    // filtered landing state that is usually the level one: 2,207 of 2,569 eligible roles
+    // never stated a level, so "entry only" is the narrowest thing on the page by far.
     list.append(el('div', 'note pad empty', state.error
       ? 'Nothing could be loaded.'
-      : 'No role matches these filters. Widening the age band is usually the fix — '
-        + 'most of this list is older than a month.'));
+      : (state.filters.levels.length && !state.filters.levels.includes('unknown')
+        ? 'No role matches these filters. The level filter is the likely cause — most of '
+          + 'this list states no level at all, and “Level unverified” brings those back.'
+        : 'No role matches these filters. Widening the age band is usually the fix — '
+          + 'most of this list is older than a month.')));
   }
   renderCounts();
   renderTail();
@@ -1835,7 +2260,17 @@ function renderCounts(){
   if (!node) return;
   const shown = document.querySelectorAll('#rows .row').length;
   const parts = [fmt(shown) + ' shown'];
-  if (state.matched > shown) parts.push('of ' + fmt(state.matched) + ' matching');
+  // ``matched`` is the *server's* answer, so it does not know about the two filters the
+  // API cannot express. Calling it "matching" while a browser-side filter is on would
+  // present 2,569 as the size of a set the visitor has already narrowed, so it is named
+  // for what it is instead: what the server-side filters matched, out of what was loaded.
+  const browserSide = browserSideFilters(state.filters) && state.source.kind === 'api';
+  if (browserSide) {
+    parts.push('from ' + fmt(state.rows.length) + ' loaded of '
+      + fmt(state.matched) + ' the other filters match');
+  } else if (state.matched > shown) {
+    parts.push('of ' + fmt(state.matched) + ' matching');
+  }
   if (state.source.eligibleTotal) {
     parts.push(fmt(state.source.eligibleTotal) + ' eligible in all');
   }

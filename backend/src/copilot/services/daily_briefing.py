@@ -191,6 +191,8 @@ class ScreeningView:
     kept: tuple[ScreenDecision, ...]
     internships: tuple[ScreenDecision, ...]
     report: ScreenReport
+    #: Ready to publish, with one exception: :attr:`ScreenedRow.first_seen` is left
+    #: unset for the store to stamp. See :func:`_row`.
     rows: tuple[ScreenedRow, ...]
     summary: ScreenSummary
 
@@ -224,6 +226,18 @@ def _quote_for(decision: ScreenDecision, gate: Exclusion) -> str:
 
 
 def _row(decision: ScreenDecision, *, view: str, gate: Exclusion | None) -> ScreenedRow:
+    """One (posting, view) row from one screening decision.
+
+    ``first_seen`` is **not** set here, and that is the one field on the row this
+    function must not touch. When we first saw a posting is storage history — it is a
+    column on the stored row, deliberately absent from ``Posting`` — so
+    ``PostingStorePort.save_screening`` stamps it from the corpus it owns. Setting it
+    here would mean either handing this pure pass a map of storage timestamps it has no
+    other use for, or stamping the run's own clock: the second is the dangerous one,
+    because it would report all 2,569 kept roles as first seen today and turn a
+    "358 new" morning into "everything is new", which is precisely the amnesia the
+    store exists to fix.
+    """
     posting = decision.posting
     verdict = decision.level_verdict
     return ScreenedRow(

@@ -58,3 +58,6 @@ infra/cdk.out/
 
 # generated UI build (embeds full posting prose — never commit)
 build/
+
+# tooling scratch
+.serena/

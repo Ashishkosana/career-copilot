@@ -115,6 +115,11 @@ The rows deliberately do not carry ``description``. It is the bulk of a posting
 item — mean 5.6 KB, 25 KB worst case, 268 MB across the deployed corpus — so
 copying it here would take each row from 1 WCU to ~6 and multiply that by the 1.79
 views a posting sits in, for data the page hydrates from the posting item anyway.
+
+They *do* carry ``first_seen``, at ~36 bytes: a 25-character stamp plus its name, which
+leaves a 424-byte row inside the same 1 KB WCU and so adds nothing to the $0.106 a
+publish costs. The alternative was reading it per page at request time, which on this
+adapter means re-fetching the very items the hydrate is already fetching.
 """
 from __future__ import annotations
 
@@ -130,6 +135,8 @@ from copilot.ports.postingstore import (
     ScreenedPage,
     ScreenedRow,
     ScreenSummary,
+    first_seen_from_stamp,
+    first_seen_stamp,
     posted_at_from_sort_key,
     summary_from_payload,
     summary_to_payload,
@@ -282,6 +289,11 @@ def _to_screened_row(item: Mapping[str, Any]) -> ScreenedRow:
         gate=str(item.get("gate", "")),
         reason=str(item.get("reason", "")),
         quote=str(item.get("quote", "")),
+        # ``.get`` and not ``[]``: rows published before this attribute existed simply
+        # do not have it, and DynamoDB stores no nulls for absent attributes. Missing
+        # decodes to ``None`` — "we did not record it" — which is the honest answer for
+        # yesterday's view and is replaced by the next cron pass.
+        first_seen=first_seen_from_stamp(item.get("first_seen")),
     )
 
 
@@ -731,13 +743,27 @@ class DynamoDbPostingStore:
         Nothing reports success before the ``with`` block exits: partial throttling
         comes back as ``UnprocessedItems`` on an HTTP 200 and BatchWriter re-queues
         it, so leaving the block is what drains the buffer.
+
+        ``first_seen`` is stamped onto each row from :meth:`_open_first_seen`, read once
+        before the loop. That is 16 KEYS_ONLY queries — the same read
+        :meth:`close_missing` already performs earlier in the same run, ~150 bytes a
+        posting — and it is deliberately *not* wrapped in a fallback: if the table cannot
+        answer that here it did not answer it minutes ago either, and this run has a
+        larger problem than a null on a card. The failure is contained one level up, by
+        the caller that keeps yesterday's view current.
         """
         expires_at = _epoch_seconds(summary.screened_at) + VIEW_TTL_SECONDS
+        stamps = self._open_first_seen()
         written = 0
         with self.table.batch_writer(overwrite_by_pkeys=["pk", "sk"]) as batch:
             for row in rows:
                 batch.put_item(
-                    Item=self._row_item(row, generation=summary.generation, expires=expires_at)
+                    Item=self._row_item(
+                        row,
+                        generation=summary.generation,
+                        expires=expires_at,
+                        first_seen=first_seen_stamp(stamps.get(row.posting_id)),
+                    )
                 )
                 written += 1
         self.table.put_item(
@@ -763,8 +789,24 @@ class DynamoDbPostingStore:
             }},
         )
 
-    def _row_item(self, row: ScreenedRow, *, generation: str, expires: int) -> dict[str, Any]:
-        return {
+    def _row_item(
+        self,
+        row: ScreenedRow,
+        *,
+        generation: str,
+        expires: int,
+        first_seen: str | None = None,
+    ) -> dict[str, Any]:
+        """One view row as an item. ``first_seen`` comes from the store, not from ``row``.
+
+        Omitted rather than written as ``None`` when it is unknown, the way ``posted_at``
+        and ``remote`` already are: DynamoDB bills attribute *names* too, and an absent
+        attribute and a null one decode identically here while only one of them costs
+        ~10 bytes on ~84,900 rows a day. With the stamp present a row measures ~460 bytes
+        against a mean of 424, so it stays inside the 1 KB WCU boundary and the publish
+        still bills exactly one WCU per row.
+        """
+        item: dict[str, Any] = {
             "pk": f"{_VIEW_PK_PREFIX}#{generation}#{row.view}#{_shard_of(row.posting_id)}",
             "sk": row.sort_key,
             "posting_id": row.posting_id,
@@ -782,6 +824,9 @@ class DynamoDbPostingStore:
             # string here would be silently ignored and the rows would live forever.
             "expires_at": expires,
         }
+        if first_seen is not None:
+            item["first_seen"] = first_seen
+        return item
 
     def screening_summary(self) -> ScreenSummary | None:
         """The published funnel, or ``None``. One GetItem, ~5 ms, always.
@@ -909,6 +954,13 @@ class DynamoDbPostingStore:
         return self._seen_index_map()
 
     def _open_first_seen(self) -> dict[str, str]:
+        """``id -> first_seen`` for the open corpus. 16 KEYS_ONLY queries, no item reads.
+
+        Two callers, both in the cron: :meth:`close_missing` diffs it against the fetch,
+        and :meth:`save_screening` stamps it onto the view rows it publishes. It is
+        ``O(corpus)`` and must stay out of every handler — the point of the view is that a
+        request never pays a corpus-sized read.
+        """
         return self._seen_index_map(state="OPEN")
 
     def _seen_index_map(self, *, state: str | None = None) -> dict[str, str]:

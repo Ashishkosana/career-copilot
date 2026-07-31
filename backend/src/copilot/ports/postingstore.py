@@ -67,9 +67,19 @@ SCREEN_VIEWS: frozenset[str] = frozenset(
     {VIEW_KEPT, VIEW_INTERNSHIPS, *(gate.value for gate in Exclusion)}
 )
 
-#: Bumped when :class:`ScreenedRow` or :class:`ScreenSummary` changes shape, so a
-#: view written by an older deploy is reported as *absent* rather than decoded
-#: wrongly. Costs one stale day; the alternative is a page of plausible nonsense.
+#: Bumped when :class:`ScreenedRow` or :class:`ScreenSummary` changes shape in a way
+#: that would make an older row decode **wrongly**, so such a view is reported as
+#: *absent* rather than misread. Costs one stale day; the alternative is a page of
+#: plausible nonsense.
+#:
+#: Deliberately **not** bumped for a field that is added as optional and whose absence
+#: has a truthful meaning — :attr:`ScreenedRow.first_seen` is the first of those. An
+#: older row decodes it as ``None``, which is exactly the fact ("that pass did not
+#: record when we first saw this"), so nothing is misread and the live view keeps
+#: serving until the next cron pass fills it in. Bumping instead would take the whole
+#: page down to "not screened yet" for a day to add one nullable column, and this repo
+#: has already paid that bill once: a version bump on the LLM interpretation cache left
+#: 400 rows counted as cached and refused on read, permanently.
 VIEW_VERSION = 1
 
 #: Sorts undated postings last in a descending recency query without dropping them.
@@ -143,6 +153,43 @@ def posted_at_from_sort_key(sort_key: str) -> datetime | None:
         return None
 
 
+def first_seen_from_stamp(stored: object | None) -> datetime | None:
+    """Decode a stored ``first_seen`` into an aware UTC instant, or ``None``.
+
+    Both adapters decode through here so the two cannot answer with two different
+    strings for one posting, the way ``posted_at`` once did.
+
+    ``None`` for anything unusable — absent, empty, or not a date — and never an
+    exception. This value crosses a storage boundary on the *read* path of a public
+    page: a row written before the field existed simply has nothing there, and a 500
+    for a missing nullable column is indistinguishable from the 504 the materialised
+    view exists to remove. "We do not know when we first saw this" is a fact the wire
+    can carry; a dead endpoint is not.
+    """
+    if stored is None:
+        return None
+    try:
+        value = datetime.fromisoformat(str(stored))
+    except (TypeError, ValueError):
+        return None
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return aware.astimezone(UTC)
+
+
+def first_seen_stamp(stored: object | None) -> str | None:
+    """Re-normalise a stored ``first_seen`` for storage *inside a view row*.
+
+    The corpus column is not written identically by the two stores — DynamoDB
+    normalises every timestamp to UTC because its keys are compared as bytes, while
+    SQLite keeps whatever offset the caller passed. Both are correct in their own
+    table and would put two different strings on the wire for the same posting, so the
+    copy that lands in the view is normalised here, once, on the way in. The cron
+    passes aware UTC today; this is what keeps that from being load-bearing.
+    """
+    value = first_seen_from_stamp(stored)
+    return None if value is None else value.isoformat()
+
+
 @dataclass(frozen=True)
 class ScreenedRow:
     """One posting's membership of one view, carrying that view's evidence.
@@ -195,6 +242,29 @@ class ScreenedRow:
     gate: str = ""
     reason: str = ""
     quote: str = ""
+    #: When **this system** first saw the posting — not when the employer published it.
+    #: ``posted_at`` is the employer's date and spans 1 to 4,572 days on the live
+    #: corpus; this is ours, and the two answer different questions. A company added to
+    #: the watchlist today delivers 200 months-old-but-open roles, every one of them new
+    #: *to this list*: the page's "posted in the last 24 hours" chip read ``posted_at``
+    #: and showed 5 on a morning the cron reported 358 new.
+    #:
+    #: **Written by the store, not by the caller**, like a column with a database
+    #: default. ``first_seen`` is storage metadata — it is a fact about our history, not
+    #: about the job, which is why it is deliberately absent from ``Posting`` — and the
+    #: only component that already knows it is the store that owns the column. So
+    #: :meth:`PostingStorePort.save_screening` stamps every row from its own corpus and
+    #: ignores whatever a caller put here; the screening pass that builds these rows is
+    #: pure and must not learn to fabricate history. Two consequences worth stating:
+    #: a stamp on a row is provably the store's own, and the pass cannot report every
+    #: card as first seen today, which is what a ``datetime.now()`` here would do to all
+    #: 2,569 kept roles.
+    #:
+    #: ``None`` means "not recorded", and it has two real causes: a view published
+    #: before this field existed (there is no migration — the next cron pass republishes
+    #: with it), and a posting the store no longer has a row for. Both are answered on
+    #: the wire as ``firstSeen: null`` rather than by refusing the page.
+    first_seen: datetime | None = None
 
     @property
     def sort_key(self) -> str:
@@ -430,6 +500,14 @@ class PostingStorePort(Protocol):
 
         One call rather than a ``begin``/``add``/``commit`` trio precisely so a
         caller cannot publish the summary first.
+
+        The implementation **stamps :attr:`ScreenedRow.first_seen` itself**, from its
+        own corpus, discarding whatever the caller set. That is the one field a caller
+        cannot supply — see the attribute — and doing it here means it costs one
+        id → timestamp read per *run* rather than one lookup per page for the rest of
+        the day. A posting the store has no timestamp for (closed and reaped between
+        the corpus read and this write) is stamped ``None``: losing one card's stamp
+        for a day is cheaper than failing a publish, which costs the whole page.
         """
         ...
 

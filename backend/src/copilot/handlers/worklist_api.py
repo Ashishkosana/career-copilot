@@ -698,9 +698,9 @@ def _posting_id_from_body(event: Mapping[str, Any]) -> str:
 class Screened:
     """One posting with the screening verdict a card renders.
 
-    Four fields, because that is everything a card and a score need beyond the
+    Five fields, because that is everything a card and a score need beyond the
     posting itself. There are two constructors because there are two honest sources
-    for those four facts, and both are load-bearing:
+    for those facts, and both are load-bearing:
 
     * :meth:`from_row` — the list routes, reading back what the cron materialised.
     * :meth:`from_decision` — ``GET /worklist/{id}``, which re-screens that **one**
@@ -710,11 +710,14 @@ class Screened:
       per posting.
 
     The two must agree field for field for the same posting. The mapping from a
-    verdict to these four fields therefore exists here *and* in
+    verdict to the four *screening* fields therefore exists here *and* in
     ``services/daily_briefing._row`` — the writer cannot import the reader — so
     ``test_a_card_from_the_view_matches_a_card_from_a_fresh_screen`` pins them
     together. Drift would show one seniority band on a card and a different one on
     that card's own detail page.
+
+    ``first_seen`` is the exception to that symmetry and is documented on the field: it
+    is storage metadata, so only the constructor that reads a stored row can have it.
     """
 
     posting: Posting
@@ -723,6 +726,11 @@ class Screened:
     level: str
     level_source: str
     level_why: str
+    #: When *this system* first saw the posting, read straight off the materialised row —
+    #: no extra query, so a page costs exactly what it cost before. ``None`` where the
+    #: value is genuinely unknown: a view published before the field existed, or a route
+    #: that does not read the view at all (see :meth:`from_decision`).
+    first_seen: datetime | None = None
 
     @classmethod
     def from_row(cls, row: ScreenedRow, posting: Posting) -> Screened:
@@ -731,10 +739,27 @@ class Screened:
             level=row.level,
             level_source=row.level_source,
             level_why=row.level_why,
+            first_seen=row.first_seen,
         )
 
     @classmethod
     def from_decision(cls, decision: ScreenDecision) -> Screened:
+        """One freshly screened posting. ``first_seen`` is unavailable here, not forgotten.
+
+        This constructor serves ``GET /worklist/{id}``, the one route that consults the
+        corpus instead of the view, and the corpus hands back a ``Posting`` — a pure
+        domain model that deliberately holds no storage history. The card therefore
+        reports ``firstSeen: null`` on a detail read, which the wire already allows for
+        yesterday's view.
+
+        The tempting fix is to look the timestamp up here. Both stores can only produce
+        it for an arbitrary posting by reading the whole corpus map
+        (``_open_first_seen``/``_known_first_seen``), and a corpus-sized read inside a
+        handler is the exact defect the materialised view was built to delete: 47,538
+        postings against a 29 s gateway ceiling, 504 on every call. A null on one card is
+        not worth reintroducing it, and the list routes — where "new to this list" is
+        actually rendered — carry the real value.
+        """
         verdict = decision.level_verdict
         return cls(
             posting=decision.posting,
@@ -1196,7 +1221,18 @@ def _description(posting: Posting) -> str | None:
 
 
 def _card(item: Screened) -> dict[str, Any]:
-    """The list-row shape. No description prose: that is a detail read."""
+    """The list-row shape. No description prose: that is a detail read.
+
+    ``postedAt`` and ``firstSeen`` are both here and are not the same date. The first is
+    what the employer says; the second is when we first saw it. On the live corpus they
+    differ by 1 to 4,572 days, because a company added to the watchlist today delivers
+    200 of its months-old-but-still-open roles and every one of them is new *to this
+    list* — the page's "posted in the last 24 hours" chip read ``postedAt`` and showed 5
+    on a morning the cron reported 358 new. Both ship so the page can stop conflating
+    them, and ``firstSeen`` is ``null`` rather than absent where it is unknown: a card
+    that dropped the key would make "we never recorded it" indistinguishable from "this
+    build does not publish it".
+    """
     posting = item.posting
     return {
         "id": posting.id,
@@ -1209,6 +1245,7 @@ def _card(item: Screened) -> dict[str, Any]:
         "levelSource": item.level_source,
         "levelWhy": item.level_why,
         "postedAt": posting.posted_at.isoformat() if posting.posted_at else None,
+        "firstSeen": item.first_seen.isoformat() if item.first_seen is not None else None,
         "remote": posting.remote,
         "employmentType": posting.employment_type,
         "descAvailable": posting.desc_available,

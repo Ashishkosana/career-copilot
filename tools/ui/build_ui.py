@@ -48,6 +48,11 @@ public build drops ``description`` entirely and keeps the short evidence excerpt
 capped at :data:`QUOTE_CAP` characters — the same cap the API applies, re-asserted
 here because this is the copy that gets published.
 
+**Why ``firstSeen`` is checked separately.** It is the one field the page reads that is
+not yet on the wire, so it is validated by :func:`check_first_seen` — shape asserted the
+moment it appears, absence reported out loud — rather than hard-required in
+:data:`CARD_FIELDS`. That function says what has to happen for it to stop being soft.
+
 **Why there is a path list and not just a review.** :data:`BOOT_PATHS` spells out every
 field the template's JavaScript reads out of the boot object, and :func:`check_boot`
 walks all of them before either file is written. That is the mechanical version of
@@ -89,7 +94,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterable, Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -164,6 +169,10 @@ CARD_FIELDS = frozenset(
         "id", "title", "company", "location", "url", "ats", "level", "levelSource",
         "levelWhy", "postedAt", "remote", "employmentType", "descAvailable",
         "descriptionStatus",
+        # When *this system* first saw the posting, which is not ``postedAt``. Required
+        # rather than tolerated: the page's "new to this list" section is built on it, and
+        # its value is checked as well as its presence — see :func:`check_first_seen`.
+        "firstSeen",
     }
 )
 SCORE_FIELDS = frozenset(
@@ -210,6 +219,11 @@ GROUP_FIELDS = frozenset({"gate", "count", "items", "page"})
 #: the *page* reads, and the two are not the same list — the page ignores
 #: ``employmentType`` and ``levelSource`` on cards, and cares about ``facets``, which
 #: the API does not send at all.
+#:
+#: One field the page reads is deliberately *not* listed here: ``firstSeen``, because a
+#: :data:`BOOT_PATHS` entry fails on an absent key and the field is landing in a parallel
+#: change to the read routes. :func:`check_first_seen` covers it instead, and says what
+#: has to happen for it to move up here.
 BOOT_PATHS: tuple[str, ...] = (
     "mode",
     "apiBase?",
@@ -241,6 +255,10 @@ BOOT_PATHS: tuple[str, ...] = (
     "snapshot.items[].level",
     "snapshot.items[].levelWhy",
     "snapshot.items[].postedAt?",
+    # Null until the next cron pass republishes the view, and the page has a first-class
+    # "not available until the next run" state for that — hence ``?``, and hence the value
+    # check in :func:`check_first_seen` on top of this presence check.
+    "snapshot.items[].firstSeen?",
     "snapshot.items[].remote?",
     "snapshot.items[].descriptionStatus",
     "snapshot.items[].description?",
@@ -269,6 +287,7 @@ BOOT_PATHS: tuple[str, ...] = (
     "snapshot.internships[].level",
     "snapshot.internships[].levelWhy",
     "snapshot.internships[].postedAt?",
+    "snapshot.internships[].firstSeen?",
     "snapshot.internships[].employmentType?",
     "snapshot.internships[].descriptionStatus",
     "snapshot.internships[].score?.tier",
@@ -793,6 +812,82 @@ def check_boot(boot: dict[str, Any], *, what: str) -> None:
         _walk_path(boot, path.split("."), path=f"{what}: {path}")
 
 
+#: When *this system* first saw a posting. Not ``postedAt``, which is when the employer
+#: says it published — the two differ by up to 4,572 days on the live corpus.
+FIRST_SEEN = "firstSeen"
+
+
+def check_first_seen(boot: dict[str, Any], *, what: str) -> None:
+    """Validate the ``firstSeen`` *values* on every card the page will render.
+
+    **What the field is for.** ``postedAt`` is the employer's date; ``firstSeen`` is ours.
+    A company added to the watchlist today delivers 200 of its months-old-but-still-open
+    roles, and every one of them is new *to this list*. That gap is measurable and large:
+    the page's "posted in the last 24 hours" block reads ``postedAt`` and showed **5** on a
+    morning the cron reported **358 new**. The worklist's "new to this list" section reads
+    this field instead, which is why the build has to know the field's shape.
+
+    **Why presence is not enough.** :data:`CARD_FIELDS` and :data:`BOOT_PATHS` already fail
+    the build if the key goes missing or turns up on only one route. Neither looks at the
+    value, and the value is where this field fails quietly: the page hands it to
+    ``Date.parse``, so a date-only ``"2026-07-31"`` or a naive ``"...T14:02:11"`` renders as
+    an off-by-hours "yesterday" in a browser and raises nothing anywhere. A stamp that will
+    not parse is worse than absent — it reads as "never seen", which is a claim about the
+    pipeline rather than about the data.
+
+    **Why an all-null answer is fine, and printed anyway.** The *published* screening view
+    predates the field, so every card reads null until the next cron pass. The page has a
+    first-class "not available until the next run" state for exactly that, because a section
+    that answered it with an empty list would be claiming "nothing is new" — the opposite
+    fact, and indistinguishable from broken software. So all-null is not an error here; it
+    is a line on stderr, so that whoever runs the build knows which state the page will show.
+    """
+    snapshot = boot["snapshot"]
+    cards = [*snapshot["items"], *snapshot["internships"]]
+    stamped = [
+        _check_stamp(card[FIRST_SEEN], what=f"{what}: {FIRST_SEEN} on {card['id']}")
+        for card in cards
+        if card[FIRST_SEEN] is not None
+    ]
+    if not stamped:
+        # stderr, not stdout: this is the state the *published* view is in today, and the
+        # page says so in words, but a build whose new-to-this-list count is structurally
+        # zero should not look identical to one that found nothing new.
+        print(
+            f"{what}: {FIRST_SEEN} is null on all {len(cards)} cards, so the page renders "
+            '"not available until the next run" — expected until the next cron pass '
+            "republishes the screening view",
+            file=sys.stderr,
+        )
+        return
+    since = datetime.now(UTC) - timedelta(days=1)
+    fresh = sum(1 for stamp in stamped if stamp >= since)
+    print(
+        f"first seen: {len(stamped)} of {len(cards)} cards stamped, {fresh} within the "
+        "last 24 h — the number the worklist's \"new to this list\" section will show"
+    )
+
+
+def _check_stamp(stamp: Any, *, what: str) -> datetime:
+    """One ``firstSeen`` value, parsed: an offset-aware ISO 8601 instant or a build error."""
+    if not isinstance(stamp, str):
+        raise BuildError(f"{what} is {type(stamp).__name__} {stamp!r}, expected a string")
+    try:
+        parsed = datetime.fromisoformat(stamp)
+    except ValueError as exc:
+        raise BuildError(
+            f"{what} is {stamp!r}, which is not ISO 8601 — the page date-parses it, and "
+            "an unparseable stamp reads as 'never seen' rather than as an error"
+        ) from exc
+    if parsed.tzinfo is None:
+        raise BuildError(
+            f"{what} is {stamp!r}, which carries no UTC offset. A naive stamp is read in "
+            "the visitor's own zone, so 'new since yesterday' would be off by hours for "
+            "everyone not in UTC — and wrong in silence"
+        )
+    return parsed
+
+
 def assert_no_bare_score(template: str) -> None:
     """The page must never render ``score.total``. See :data:`_BARE_SCORE`."""
     found = _BARE_SCORE.search(template)
@@ -1124,9 +1219,18 @@ def _cap_screening(screening: dict[str, Any]) -> None:
 # Rendering + output checks
 # ---------------------------------------------------------------------------
 
+#: Every way a page can end up fetching something. ``<link href="data:…">`` is the one
+#: exemption, and it is spelled as a lookahead rather than dropped: the page 404'd on
+#: ``/favicon.ico`` on every load, and the fix is an inline SVG icon — a data URI is
+#: bytes already in the file, not a request. Any other ``href`` on a ``<link>``, absolute
+#: or relative, still fails the build, which is what this tuple is for.
 _ASSET_PATTERNS = (
     re.compile(r"<script[^>]+\ssrc\s*=", re.I),
-    re.compile(r"<link[^>]+\shref\s*=", re.I),
+    # The lookahead swallows the quote itself. Written as ``(?!['\"]?data:)`` and not as
+    # ``['\"]?(?!data:)``, which is the same expression with the optionality on the wrong
+    # side of the negation: with nothing consumed for the quote, ``(?!data:)`` looks at the
+    # ``"`` and happily succeeds, so the exemption never applied and every icon failed.
+    re.compile(r"<link[^>]+\shref\s*=\s*(?!['\"]?data:)", re.I),
     re.compile(r"@import", re.I),
     re.compile(r"url\(\s*['\"]?https?:", re.I),
     re.compile(r"<iframe|<img[^>]+\ssrc\s*=\s*['\"]https?:", re.I),
@@ -1382,6 +1486,7 @@ def build_local(args: argparse.Namespace, template: str, snapshot: dict[str, Any
         "snapshot": snapshot,
     }
     check_boot(boot, what="local build")
+    check_first_seen(boot, what="local build")
     assert_api_wiring(boot, what="local build", public=False)
     html = render(template, boot)
     assert_self_contained(html, what="local build")
@@ -1408,6 +1513,7 @@ def build_public(args: argparse.Namespace, template: str, snapshot: dict[str, An
         "snapshot": strip_prose(snapshot),
     }
     check_boot(boot, what="public build")
+    check_first_seen(boot, what="public build")
     assert_no_prose(boot, what="public build")
     assert_api_wiring(boot, what="public build", public=True)
     html = render(template, boot)

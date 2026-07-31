@@ -22,6 +22,11 @@ Two further tables hold the **materialised screening view** (see
 generation column is what makes publishing atomic — rows land under a new
 generation that nothing reads until the summary names it — and it is why a screen
 that dies half-way cannot leave a half-written view that reads as authoritative.
+
+``screen_rows`` carries a copy of ``first_seen`` for the same reason it carries the
+level verdict: a read is one page of one view plus a hydrate, and a card that had to
+ask the corpus "when did we first see this" would add a lookup per page for a fact the
+publish already had in hand.
 """
 from __future__ import annotations
 
@@ -40,6 +45,8 @@ from copilot.ports.postingstore import (
     ScreenedPage,
     ScreenedRow,
     ScreenSummary,
+    first_seen_from_stamp,
+    first_seen_stamp,
     posted_at_from_sort_key,
     summary_from_json,
     summary_to_json,
@@ -89,6 +96,10 @@ CREATE TABLE IF NOT EXISTS screen_rows (
     gate                TEXT NOT NULL DEFAULT '',
     reason              TEXT NOT NULL DEFAULT '',
     quote               TEXT NOT NULL DEFAULT '',
+    -- When *we* first saw the posting, copied off the corpus row at publish time.
+    -- Nullable, and that is the whole compatibility story: rows written before this
+    -- column existed read as NULL, which is the truth about them.
+    first_seen          TEXT,
     -- (generation, view, sort_key) rather than a rowid: this *is* the index the
     -- read path pages on, so the primary key does the work and no second B-tree
     -- is written 45k times a day for nothing.
@@ -109,12 +120,19 @@ _COLUMNS = (
     "req_id, posted_at, remote, employment_type, experience_level"
 )
 
-#: Columns added after the first release. ``CREATE TABLE IF NOT EXISTS`` is a no-op
-#: on an existing file, so a new column in :data:`_SCHEMA` alone would leave every
-#: already-populated database (the developer's ~25k-row ``data/postings.db``) one
-#: column short and every read raising ``KeyError``. Applied idempotently at open.
-_ADDED_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("experience_level", "TEXT NOT NULL DEFAULT ''"),
+#: ``(table, column, ddl)`` for every column added after the first release.
+#: ``CREATE TABLE IF NOT EXISTS`` is a no-op on an existing file, so a new column in
+#: :data:`_SCHEMA` alone would leave every already-populated database (the developer's
+#: ~25k-row ``data/postings.db``) one column short and every read raising ``KeyError``.
+#: Applied idempotently at open.
+#:
+#: ``screen_rows.first_seen`` is nullable on purpose: the ALTER adds it to a table that
+#: already holds a published view, and those rows genuinely do not know the answer. They
+#: read as ``firstSeen: null`` until the next cron pass republishes — no backfill, and
+#: nothing refuses a page it can still serve.
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("postings", "experience_level", "TEXT NOT NULL DEFAULT ''"),
+    ("screen_rows", "first_seen", "TEXT"),
 )
 
 
@@ -146,11 +164,19 @@ class SqlitePostingStore:
         boards in under a minute, so the cost of a wrong migration is far higher
         than the cost of rebuilding, and the only thing worth preserving across a
         schema change is ``first_seen`` and the LLM cache.
+
+        The view tables are migrated the same way and for a sharper reason: they are
+        rebuilt daily by the cron, so an added column needs no backfill at all — but the
+        *existing* rows must keep being readable until then, which an ALTER to a nullable
+        column gives and a ``DROP TABLE`` would not.
         """
-        have = {str(row["name"]) for row in self._conn.execute("PRAGMA table_info(postings)")}
-        for name, ddl in _ADDED_COLUMNS:
+        for table, name, ddl in _ADDED_COLUMNS:
+            have = {
+                str(row["name"])
+                for row in self._conn.execute(f"PRAGMA table_info({table})")
+            }
             if name not in have:
-                self._conn.execute(f"ALTER TABLE postings ADD COLUMN {name} {ddl}")
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
     def close(self) -> None:
         self._conn.close()
@@ -261,7 +287,15 @@ class SqlitePostingStore:
         corpus — while the DynamoDB adapter uses a TTL instead, because there deletes
         cost as much as writes and ~85k of them a day is real money for rows nothing
         can read.
+
+        ``first_seen`` is stamped here from the corpus rather than taken from the row,
+        because the store owns that column and the pure screening pass upstream has no
+        access to it. One query for the whole map, ahead of the loop, deliberately: the
+        alternative — a correlated subquery per row — is 45,158 index probes for a join
+        that costs 20 ms done once, and the same shape as the DynamoDB adapter, which is
+        what keeps the two answering identically.
         """
+        stamps = self._open_first_seen()
         payload = [
             (
                 summary.generation,
@@ -277,6 +311,7 @@ class SqlitePostingStore:
                 row.gate,
                 row.reason,
                 row.quote,
+                first_seen_stamp(stamps.get(row.posting_id)),
             )
             for row in rows
         ]
@@ -286,8 +321,8 @@ class SqlitePostingStore:
                 INSERT INTO screen_rows (
                     generation, view, sort_key, posting_id, kept, level,
                     level_source, level_why, eligibility_checked, sponsorship,
-                    gate, reason, quote
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    gate, reason, quote, first_seen
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(generation, view, sort_key) DO NOTHING
                 """,
                 payload,
@@ -344,6 +379,22 @@ class SqlitePostingStore:
         next_token = rows[-1].sort_key if len(found) > limit and rows else None
         return ScreenedPage(rows=rows, next_token=next_token)
 
+    def _open_first_seen(self) -> dict[str, str]:
+        """``id -> first_seen`` for every open posting. The view's own copy comes from here.
+
+        Open only, matching the corpus the screen covers, and named to match the
+        DynamoDB adapter's method of the same name so the two publish paths read alike.
+        Two columns of ~25k rows is ~1.5 MB and ~20 ms; it is a cron cost, and no
+        handler may call it — that is the ``O(corpus)`` read the materialised view
+        exists to keep off the request path.
+        """
+        return {
+            str(row["id"]): str(row["first_seen"])
+            for row in self._conn.execute(
+                "SELECT id, first_seen FROM postings WHERE closed_at IS NULL"
+            )
+        }
+
     @staticmethod
     def _to_screened_row(row: sqlite3.Row) -> ScreenedRow:
         return ScreenedRow(
@@ -362,6 +413,9 @@ class SqlitePostingStore:
             gate=row["gate"],
             reason=row["reason"],
             quote=row["quote"],
+            # NULL for a row written before the column existed. Decoded, not raised on:
+            # the next cron pass fills it in and until then the card says "not recorded".
+            first_seen=first_seen_from_stamp(row["first_seen"]),
         )
 
     # --- reads ---------------------------------------------------------------

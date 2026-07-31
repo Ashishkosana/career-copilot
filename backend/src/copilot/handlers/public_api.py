@@ -225,6 +225,13 @@ CARD_FIELDS: Final[Fields] = {
     "levelSource": None,
     "levelWhy": EXCERPT,
     "postedAt": None,
+    # When *we* first saw the posting, which is ours and not the employer's. Publishable
+    # for the same reason ``postedAt`` is: it is one timestamp about a public job ad, it
+    # discloses nothing about the reader, and the page needs it to tell "new to this
+    # list" from "posted recently" — two facts that differ by up to 4,572 days here.
+    # Allowlisted as a scalar, so the day it grows into an object the projection refuses
+    # rather than publishing whatever ends up inside it.
+    "firstSeen": None,
     "remote": None,
     "employmentType": None,
     "descAvailable": None,

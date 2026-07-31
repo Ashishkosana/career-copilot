@@ -1,7 +1,7 @@
 # Read seniority levels with Claude Code, on a schedule, using the subscription.
 #
-# Why here and not in the Lambda. 631 eligible postings state no level in their
-# title, and resolving them needs a language model. The Messages API requires a
+# Why here and not in the Lambda. 2,207 of the 2,569 kept postings state no level in
+# their title, and resolving them needs a language model. The Messages API requires a
 # Console `sk-ant-api03-` key on a prepaid balance; a Claude subscription issues a
 # `sk-ant-oat01-` token, which authenticates the Claude Code *program* and answers
 # `401 invalid x-api-key` against the API — separate doors, because a flat
@@ -25,7 +25,10 @@
 #     scope and no project instructions to inherit.
 #   * The token is `CLAUDE_CODE_OAUTH_TOKEN`. It cannot call the Messages API and
 #     cannot touch AWS. The AWS credentials are scoped to the two Python steps, which
-#     make no model call.
+#     make no model call. That separation is why the rounds loop lives *inside* the
+#     model step instead of the step list looping around a per-round import: a step
+#     that both calls the model and writes to DynamoDB would need both sets of
+#     credentials at once, and there would no longer be a step that cannot reach AWS.
 #
 # The remaining surface is a description trying to talk the model into a wrong
 # answer. That is handled by verification rather than by trust: `import` re-reads the
@@ -33,6 +36,31 @@
 # it. An injected "call every role entry-level" yields a quote that is not in the
 # text, which is forced to low confidence and flagged `evidence_verified: false`, so
 # nothing downstream treats it as supported.
+#
+# ---------------------------------------------------------------------------
+# How one run drains many postings.
+#
+# One `claude --print` call has a finite context, so a run is several sequential
+# rounds. `export` screens the corpus once and shards the queue into `round-NN.json`
+# of <=CHUNK postings each; `prompt` turns each into `round-NN.prompt.txt`; the model
+# step answers them one at a time into `round-NN.raw.txt`; `import` validates every
+# round in one pass. Two corpus screens per run, not two per round — screening is
+# 1.5 ms a posting and ~75 s over the deployed 47,550, so a per-round export/import
+# loop would spend over two hours of screening to buy 30 minutes of model work.
+#
+# Rounds are sequential on purpose: they share one subscription and one rate limit,
+# so a matrix would only collide with itself.
+#
+# A failed round does not discard the rounds already answered. The loop deletes that
+# round's partial output, stops rather than hammering a limit that may have just been
+# hit, and exits non-zero — and the import step runs anyway (`!cancelled()`), so the
+# rounds that came back are still cached and the job still reports red. Anything the
+# run did not reach is simply still uncached, so the next run re-derives it.
+#
+# Measured, on real descriptions from the corpus: 25 postings = 118 KB of prompt,
+# answered in 23 s. So a run costs about 0.9 s a posting plus ~3 min of fixed cost
+# (install, two screens). limit=1000 is the ceiling the script clamps to: ~40 rounds,
+# ~22 min, against `timeout-minutes: 45`.
 name: levels
 
 on:
@@ -41,11 +69,18 @@ on:
     # postings this reads about already exist.
     - cron: "0 15 * * *"
   workflow_dispatch:
+    # The 2,207-posting backlog is a one-time catch-up, so the manual default is the
+    # big one: 500 postings, 20 rounds, ~15 min end to end. Five of these drain it.
+    # The cron below stays small because steady state is ~20-40 postings a morning.
     inputs:
       limit:
-        description: "How many postings to resolve this run"
+        description: "How many postings to resolve this run (clamped to 1000)"
         required: false
-        default: "60"
+        default: "500"
+      chunk:
+        description: "Postings per model round"
+        required: false
+        default: "25"
 
 permissions:
   contents: read
@@ -60,9 +95,18 @@ concurrency:
 jobs:
   levels:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 45, not 25: a manual drain of 1,000 postings is ~40 sequential rounds at ~23 s
+    # each plus two corpus screens, ~22 min measured, and the timeout has to sit above
+    # the worst case the script will accept rather than above the daily case.
+    timeout-minutes: 45
     env:
-      LIMIT: ${{ inputs.limit || '60' }}
+      # The cron takes 150 — six rounds, ~4 min — because a normal morning leaves
+      # ~20-40 postings needing a level. A manual run passes its own, up to 1,000.
+      LIMIT: ${{ inputs.limit || '150' }}
+      CHUNK: ${{ inputs.chunk || '25' }}
+      # One directory holds round-NN.json / .prompt.txt / .raw.txt. Under RUNNER_TEMP
+      # because the model step must not be able to see the checkout.
+      LEVELS_DIR: ${{ runner.temp }}/levels
     steps:
       - uses: actions/checkout@v4
 
@@ -91,61 +135,86 @@ jobs:
           COPILOT_POSTINGS_TABLE_NAME: career-copilot-postings
         run: |
           python scripts/level_batch.py export \
-            --out "$RUNNER_TEMP/todo.json" --limit "$LIMIT"
+            --dir "$LEVELS_DIR" --limit "$LIMIT" --chunk "$CHUNK"
 
       # Nothing to do is the normal state once the queue is drained. It must not spend
-      # a model call, and it must not fail the run.
+      # a model call, and it must not fail the run. The number is *rounds*, because the
+      # only question here is whether the loop below has anything to iterate over.
       - name: Anything to do?
         id: check
         working-directory: backend
         run: |
-          count=$(python scripts/level_batch.py count --in "$RUNNER_TEMP/todo.json")
-          echo "count=$count" >> "$GITHUB_OUTPUT"
-          echo "$count postings need a level."
+          rounds=$(python scripts/level_batch.py count --dir "$LEVELS_DIR")
+          echo "rounds=$rounds" >> "$GITHUB_OUTPUT"
+          echo "$rounds rounds to ask about."
 
-      - name: Build the prompt
-        if: steps.check.outputs.count != '0'
+      - name: Build the prompts
+        if: steps.check.outputs.rounds != '0'
         working-directory: backend
-        run: |
-          python scripts/level_batch.py prompt \
-            --in "$RUNNER_TEMP/todo.json" --out "$RUNNER_TEMP/prompt.txt"
+        run: python scripts/level_batch.py prompt --dir "$LEVELS_DIR"
 
       - name: Read the levels
-        if: steps.check.outputs.count != '0'
+        if: steps.check.outputs.rounds != '0'
         # Not the checkout: nothing in the repo should be reachable from this step.
         working-directory: ${{ runner.temp }}
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
-          # The prompt is an argument and `--allowed-tools` follows it, because that
-          # flag is variadic and swallows a prompt placed after it — which fails with
-          # "Input must be provided", two arguments away from the cause.
-          # `< /dev/null` closes stdin so the CLI does not wait 3 s for input it will
-          # not get.
-          claude --print "$(cat prompt.txt)" --allowed-tools "" \
-            < /dev/null > raw.txt
-          echo "model returned $(wc -c < raw.txt) bytes"
+          # The prompt goes in on **stdin**, not as an argument. Linux caps a single
+          # argv string at 32 pages — 131,072 bytes — and `claude --print "$(cat
+          # prompt.txt)"` was already at 118 KB for 25 postings, ~180 KB once JSON
+          # escaping is counted at the 6,000-char description cap. Past the cap execve
+          # fails with E2BIG, "Argument list too long", which would have shown up as an
+          # unexplained failure on the runner and never on a Mac (no per-arg limit
+          # there). On stdin there is no such ceiling, and the variadic `--allowed-tools`
+          # no longer has a trailing prompt to swallow.
+          shopt -s nullglob
+          failed=0
+          for prompt in "$LEVELS_DIR"/round-*.prompt.txt; do
+            raw="${prompt%.prompt.txt}.raw.txt"
+            echo "::group::$(basename "$prompt")"
+            # `timeout` so one hung call cannot eat the whole job budget: a 25-posting
+            # round is 23 s measured, so 300 s is 13x headroom, and a timeout is
+            # treated as a failed round rather than as a stall.
+            if timeout 300 claude --print --allowed-tools "" < "$prompt" > "$raw"; then
+              echo "$(basename "$raw"): $(wc -c < "$raw") bytes"
+            else
+              status=$?
+              # Delete the partial answer: half a JSON object is not evidence, and
+              # leaving it would import one truncated round's first entry as if it were
+              # the round. Stop rather than continue — the likely cause is a rate limit,
+              # and the rounds already answered are real spend that the import step is
+              # about to bank.
+              rm -f "$raw"
+              echo "$(basename "$prompt") failed (exit $status). Stopping;" \
+                   "the rounds already answered are still imported."
+              failed=1
+              echo "::endgroup::"
+              break
+            fi
+            echo "::endgroup::"
+          done
+          exit "$failed"
 
+      # `!cancelled()` rather than `success()`: this is the step that banks the work. A
+      # round that failed above must not throw away the rounds that came back, and the
+      # run still reports red because that step exited non-zero.
       - name: Validate and cache the answers
-        if: steps.check.outputs.count != '0'
+        if: ${{ !cancelled() && steps.check.outputs.rounds != '0' }}
         working-directory: backend
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: us-east-1
           COPILOT_POSTINGS_TABLE_NAME: career-copilot-postings
-        run: |
-          python scripts/level_batch.py import \
-            --in "$RUNNER_TEMP/raw.txt" --limit "$LIMIT"
+        run: python scripts/level_batch.py import --dir "$LEVELS_DIR"
 
       # Kept on failure only. These files hold other people's job descriptions, so a
       # green run leaves nothing behind.
       - name: Upload the batch for inspection
-        if: failure() && steps.check.outputs.count != '0'
+        if: failure() && steps.check.outputs.rounds != '0'
         uses: actions/upload-artifact@v4
         with:
           name: level-batch
-          path: |
-            ${{ runner.temp }}/todo.json
-            ${{ runner.temp }}/raw.txt
+          path: ${{ runner.temp }}/levels
           retention-days: 3

@@ -321,8 +321,8 @@ class TestPublishedShape:
         [item] = page["items"]
         assert set(item) == {
             "id", "title", "company", "location", "url", "ats", "level", "levelSource",
-            "levelWhy", "postedAt", "remote", "employmentType", "descAvailable",
-            "descriptionStatus", "descriptionWithheld", "score",
+            "levelWhy", "postedAt", "firstSeen", "remote", "employmentType",
+            "descAvailable", "descriptionStatus", "descriptionWithheld", "score",
         }
         assert page["collection"] == "worklist"
         assert page["prosePublished"] is False

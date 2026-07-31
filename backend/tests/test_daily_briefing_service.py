@@ -488,6 +488,39 @@ class TestTheScreeningViewIsMaterialised:
         assert published is not None
         assert len(run.briefing.jobs) == published.eligible_total == 1
 
+    def test_the_published_view_records_when_we_first_saw_each_posting(self) -> None:
+        """The whole plumb, end to end through a real store: sync writes ``first_seen``,
+        the publish copies it onto the row, and a page read hands it to the card. The
+        page needs it because ``postedAt`` cannot answer "what is new *to this list*" —
+        it read 5 on a morning the cron reported 358 new.
+        """
+        service, _, _, store = build(postings=[posting(1, "New Grad Software Engineer")])
+        service.run(user_id="u1")
+
+        published = store.screening_summary()
+        assert published is not None
+        [row] = store.screened_page(VIEW_KEPT, generation=published.generation, limit=25).rows
+        assert row.first_seen == FIXED_NOW
+
+    def test_a_second_run_does_not_report_a_standing_role_as_first_seen_today(self) -> None:
+        """The failure that would make the field worse than useless.
+
+        Every run republishes the whole view, so a stamp taken from the run's clock would
+        report all 2,569 kept roles as new every morning. ``first_seen`` is set once on
+        the posting and the view copies *that*, which is why the pure screening pass is
+        not allowed to fill the field in.
+        """
+        service, _, _, store = build(postings=[posting(1, "New Grad Software Engineer")])
+        service.run(user_id="u1")
+        service.now = lambda: FIXED_NOW + timedelta(days=2)
+        service.run(user_id="u1")
+
+        published = store.screening_summary()
+        assert published is not None
+        assert published.screened_at == FIXED_NOW + timedelta(days=2), "a new pass"
+        [row] = store.screened_page(VIEW_KEPT, generation=published.generation, limit=25).rows
+        assert row.first_seen == FIXED_NOW, "we met this role two days ago"
+
 
 class TestBuildScreeningView:
     """The materialisation itself — pure, so it is asserted without a store."""
@@ -511,6 +544,21 @@ class TestBuildScreeningView:
             "not_a_software_role",
             "wrong_seniority_band",
         ]
+
+    def test_the_pass_leaves_first_seen_to_the_store(self) -> None:
+        """This pass is pure and has no history, so it must not guess at one.
+
+        The only timestamp in reach here is ``now``, and stamping it would tell the page
+        that every role in the corpus was met today — 2,569 of them — which is the
+        amnesia the store exists to cure rather than reproduce. ``None`` out of the
+        builder is what makes ``save_screening``'s stamp the single source of the value.
+        """
+        view = build_screening_view(
+            [posting(1, "New Grad Software Engineer"), posting(2, "Senior Sales Engineer")],
+            now=FIXED_NOW,
+        )
+        assert view.rows, "the case is vacuous without rows"
+        assert all(row.first_seen is None for row in view.rows)
 
     def test_the_row_count_exceeds_the_posting_count_by_the_overcount(self) -> None:
         """~1.76 rows per posting on the live corpus. A reader that assumed one row

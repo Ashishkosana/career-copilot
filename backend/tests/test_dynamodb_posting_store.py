@@ -24,7 +24,7 @@ import sys
 import types
 from collections.abc import Iterator, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
@@ -452,7 +452,15 @@ def dynamo(*, page_size: int = 100) -> tuple[DynamoDbPostingStore, FakeTable]:
     return DynamoDbPostingStore("career-copilot-postings", table=table), table
 
 
-def kept_row(n: int, *, posted_at: datetime | None = DAY1) -> ScreenedRow:
+def kept_row(
+    n: int, *, posted_at: datetime | None = DAY1, first_seen: datetime | None = None
+) -> ScreenedRow:
+    """One kept row. ``first_seen`` defaults to unset, as the real writer leaves it.
+
+    It is settable only so :class:`TestFirstSeen` can prove the store ignores it: the
+    screening pass that builds these rows has no access to storage history, and the
+    store stamps the column it owns.
+    """
     return ScreenedRow(
         posting_id=post(n).id,
         view=VIEW_KEPT,
@@ -463,6 +471,7 @@ def kept_row(n: int, *, posted_at: datetime | None = DAY1) -> ScreenedRow:
         level_why="the title carries an entry marker",
         eligibility_checked=True,
         sponsorship="unstated",
+        first_seen=first_seen,
     )
 
 
@@ -1087,6 +1096,151 @@ class TestScreeningViewMembership:
         ).rows
         assert stored == row
 
+    def test_first_seen_is_not_declarable_by_the_caller_so_it_is_covered_below(
+        self, store: Any
+    ) -> None:
+        """Guards the guard above, which cannot cover every field any more.
+
+        ``first_seen`` is the one field the store writes rather than round-trips: no
+        posting was synced in that case, so the row above comes back with ``None`` and an
+        adapter that dropped the column entirely would still pass. :class:`TestFirstSeen`
+        is what actually holds both stores to it, and this is the breadcrumb that says so
+        — a field with no owner is how ``experience_level`` stayed broken in SQLite while
+        an equality assertion passed.
+        """
+        row = kept_row(1, first_seen=DAY3)
+        store.save_screening([row], summary=view_summary([row]))
+        [stored] = store.screened_page(VIEW_KEPT, generation="gen-1", limit=5).rows
+        assert stored.first_seen is None, "the corpus is empty, so the store knows nothing"
+        assert stored == replace(row, first_seen=None), "every *other* field round-trips"
+
+
+class TestFirstSeen:
+    """When *this system* first saw a posting, published on every card.
+
+    The bug: the page's "posted in the last 24 hours" chip reads ``posted_at``, the
+    employer's own date, and showed **5** on a morning the cron reported **358 new**.
+    ``posted_at`` spans 1 to 4,572 days on the live corpus — a company added to the
+    watchlist today delivers 200 months-old-but-still-open roles, all of them new *to
+    us* — so the two dates answer different questions and the page needs both.
+
+    The field rides the materialised row so a read stays O(page): no lookup is added to
+    a request, and the stamp on a card provably comes from the pass whose counts sit
+    beside it. Every case here runs against both stores, because a stamp that exists on
+    the laptop and not in Lambda is worse than no stamp at all.
+    """
+
+    def test_a_row_carries_the_moment_the_store_first_saw_the_posting(
+        self, store: Any
+    ) -> None:
+        store.sync([post(1)], now=DAY1)
+        rows = [kept_row(1)]
+        store.save_screening(rows, summary=view_summary(rows))
+        [stored] = store.screened_page(VIEW_KEPT, generation="gen-1", limit=5).rows
+        assert stored.first_seen == DAY1
+
+    def test_first_seen_is_ours_and_posted_at_is_the_employers(self, store: Any) -> None:
+        """The gap this field exists for, in its production shape: an old-but-open role
+        that we only met today. Collapsing the two would either report 47,550 roles as
+        new on day one or, as the live page did, report 5 when 358 were.
+        """
+        old = post(1).model_copy(update={"posted_at": DAY1 - timedelta(days=4572)})
+        store.sync([old], now=DAY2)
+        rows = [ScreenedRow(
+            posting_id=old.id,
+            view=VIEW_KEPT,
+            posted_at=old.posted_at,
+            kept=True,
+            level="entry",
+            level_source="title",
+            level_why="the title carries an entry marker",
+            eligibility_checked=True,
+            sponsorship="unstated",
+        )]
+        store.save_screening(rows, summary=view_summary(rows))
+        [stored] = store.screened_page(VIEW_KEPT, generation="gen-1", limit=5).rows
+        assert stored.posted_at == DAY1 - timedelta(days=4572)
+        assert stored.first_seen == DAY2
+
+    def test_a_role_seen_again_today_keeps_its_original_stamp(self, store: Any) -> None:
+        """The failure mode that would make the whole field useless: every republish
+        reporting the corpus as new. ``first_seen`` is set once on the posting, and the
+        view copies *that*, not the run's clock — so a standing role stays old news
+        through every pass that reprints it.
+        """
+        store.sync([post(1)], now=DAY1)
+        store.sync([post(1)], now=DAY3)
+        rows = [kept_row(1)]
+        store.save_screening(rows, summary=view_summary(rows, generation="gen-2"))
+        [stored] = store.screened_page(VIEW_KEPT, generation="gen-2", limit=5).rows
+        assert stored.first_seen == DAY1
+
+    def test_the_store_overrides_whatever_the_caller_put_on_the_row(
+        self, store: Any
+    ) -> None:
+        """The store owns this column, like a database default owns its own.
+
+        A caller that could set it could invent history — and the caller here is a pure
+        screening pass whose only available timestamp is "now", which is exactly the
+        wrong answer for all 2,569 kept roles.
+        """
+        store.sync([post(1)], now=DAY1)
+        rows = [kept_row(1, first_seen=DAY3)]
+        store.save_screening(rows, summary=view_summary(rows))
+        [stored] = store.screened_page(VIEW_KEPT, generation="gen-1", limit=5).rows
+        assert stored.first_seen == DAY1
+
+    def test_a_posting_the_store_no_longer_has_is_stamped_null_not_refused(
+        self, store: Any
+    ) -> None:
+        """The corpus moves under the publish: a posting can be closed and reaped
+        between the screen reading it and the view being written. One missing stamp must
+        cost that card's stamp — the port already says a missing row costs the row — and
+        never the publish, which costs the whole page for a day.
+        """
+        store.sync([post(1)], now=DAY1)
+        rows = [kept_row(1), kept_row(2)]  # 2 was never synced
+        store.save_screening(rows, summary=view_summary(rows))
+        stamps = {
+            row.posting_id: row.first_seen
+            for row in store.screened_page(VIEW_KEPT, generation="gen-1", limit=5).rows
+        }
+        assert stamps == {post(1).id: DAY1, post(2).id: None}
+
+    def test_a_closed_posting_keeps_its_stamp_in_the_gate_views(self, store: Any) -> None:
+        """``/excluded`` pages postings the worklist no longer lists, and its cards go
+        through the same shaper. A stamp that only the kept view carried would make the
+        page's "new to this list" section right and the excluded section quietly wrong.
+        """
+        store.sync([post(1)], now=DAY1)
+        rows = [gate_row(1, Exclusion.CITIZENSHIP)]
+        store.save_screening(rows, summary=view_summary(rows))
+        [stored] = store.screened_page(
+            Exclusion.CITIZENSHIP.value, generation="gen-1", limit=5
+        ).rows
+        assert stored.first_seen == DAY1
+
+    def test_a_non_utc_clock_comes_back_identically_from_both_stores(
+        self, store: Any
+    ) -> None:
+        """The divergence this field could have inherited from ``posted_at``.
+
+        SQLite stores the corpus timestamp with whatever offset it was given while
+        DynamoDB normalises every stamp to UTC, because its keys are compared as bytes.
+        Those two compare **equal as instants**, which is exactly why the difference
+        would survive an equality assertion and then surface as ``14:00+05:00`` on the
+        laptop and ``09:00+00:00`` in Lambda for one posting. The view's copy is
+        normalised on the way in, so the string on the wire is the same from both.
+        """
+        tehran = datetime(2026, 7, 1, 14, 0, tzinfo=timezone(timedelta(hours=5)))
+        store.sync([post(1)], now=tehran)
+        rows = [kept_row(1)]
+        store.save_screening(rows, summary=view_summary(rows))
+        [stored] = store.screened_page(VIEW_KEPT, generation="gen-1", limit=5).rows
+        assert stored.first_seen == tehran
+        assert stored.first_seen is not None
+        assert stored.first_seen.isoformat() == "2026-07-01T09:00:00+00:00"
+
 
 class TestHydratingAPage:
     def test_a_page_of_ids_becomes_postings(self, store: Any) -> None:
@@ -1444,6 +1598,54 @@ class TestScreeningViewOnDynamo:
         expires = stored[0]["expires_at"]
         assert isinstance(expires, int)
         assert expires == int(DAY2.timestamp()) + adapter.VIEW_TTL_SECONDS
+
+    def test_first_seen_is_read_from_the_index_not_with_a_get_per_row(self) -> None:
+        """~84,900 rows a day. A GetItem per row to fetch one timestamp would be ~84,900
+        round trips at ~5 ms — over an hour, inside a 900 s cron — and it would bill the
+        whole 5.6 KB posting item each time to read 25 characters. The stamps come from
+        one sweep of the KEYS_ONLY ``seen-index``, whose sort key already carries
+        ``first_seen``: 16 queries flat, the same read ``close_missing`` performs earlier
+        in the same run.
+        """
+        store, table = dynamo()
+        postings = [post(n) for n in range(40)]
+        store.sync(postings, now=DAY1)
+        table.gets = 0
+        table.queries = 0
+        rows = [kept_row(n) for n in range(40)]
+        store.save_screening(rows, summary=view_summary(rows))
+        assert table.gets == 0, "a publish must not read one posting item per row"
+        assert table.queries == 16, "one query per shard, and no more than one sweep"
+        assert all(row.first_seen == DAY1 for row in
+                   store.screened_page(VIEW_KEPT, generation="gen-1", limit=40).rows)
+
+    def test_an_unknown_stamp_is_an_absent_attribute_and_reads_as_null(self) -> None:
+        """This is also what every row published *before* the field existed looks like:
+        DynamoDB stores nothing for an absent attribute, so yesterday's view decodes to
+        ``firstSeen: null`` and the next pass fills it in. No migration, no backfill, and
+        crucially no refusal — a version bump would have blanked the page for a day, which
+        is how 400 interpretation rows once became permanently unreadable.
+        """
+        store, table = dynamo()
+        rows = [kept_row(1)]  # nothing synced, so the store has no stamp to give
+        store.save_screening(rows, summary=view_summary(rows))
+        [item] = [i for k, i in table.items.items() if str(k[0]).startswith("SCREENVIEW#")]
+        assert "first_seen" not in item
+        [stored] = store.screened_page(VIEW_KEPT, generation="gen-1", limit=5).rows
+        assert stored.first_seen is None
+
+    def test_a_row_with_a_stamp_still_bills_one_wcu(self) -> None:
+        """424 bytes on the mean measured, and a WCU is 1 KB: the field had to be free.
+        Had it pushed a row over, the publish would have gone from ~84,900 WCU to
+        ~169,800 — $0.106 to $0.212 a run — to carry one timestamp.
+        """
+        store, table = dynamo()
+        store.sync([post(1)], now=DAY1)
+        rows = [gate_row(1, Exclusion.CITIZENSHIP, quote="x" * QUOTE_MAX_CHARS)]
+        store.save_screening(rows, summary=view_summary(rows))
+        [item] = [i for k, i in table.items.items() if str(k[0]).startswith("SCREENVIEW#")]
+        assert item["first_seen"] == DAY1.isoformat()
+        assert item_size_bytes(item) < 1024
 
     def test_the_view_never_stores_a_description(self) -> None:
         """~2.5 KB a posting and ~118 MB across the corpus. Copying it into a

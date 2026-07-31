@@ -260,3 +260,86 @@ class TestScreeningViewStorage:
         again = SqlitePostingStore(path)
         assert len(again.screened_page(VIEW_KEPT, generation="gen-1", limit=10).rows) == 1
         again.close()
+
+
+class TestTheFirstSeenColumnOnAnOlderFile:
+    """The column this file gained after a view was already published in it.
+
+    ``screen_rows.first_seen`` is added by ``_migrate``, not by ``CREATE TABLE IF NOT
+    EXISTS``, which is a no-op on an existing table — the trap ``experience_level`` fell
+    into. What is different here is that the table already holds *rows*: the developer's
+    25k-row ``data/postings.db`` and the deployed table both carry a published view that
+    predates the field, and those rows must keep serving as ``firstSeen: null`` until
+    tomorrow's cron republishes them. A schema bump instead of a nullable column is how
+    400 LLM interpretation rows once ended up counted as cached and refused on read,
+    permanently; this is the same shape and must not repeat it.
+    """
+
+    def _pre_change_file(self, path: Path) -> None:
+        """The exact ``screen_rows`` this code shipped before ``first_seen`` existed."""
+        with sqlite3.connect(path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE screen_rows (
+                    generation TEXT NOT NULL, view TEXT NOT NULL, sort_key TEXT NOT NULL,
+                    posting_id TEXT NOT NULL, kept INTEGER NOT NULL, level TEXT NOT NULL,
+                    level_source TEXT NOT NULL, level_why TEXT NOT NULL DEFAULT '',
+                    eligibility_checked INTEGER NOT NULL, sponsorship TEXT NOT NULL,
+                    gate TEXT NOT NULL DEFAULT '', reason TEXT NOT NULL DEFAULT '',
+                    quote TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (generation, view, sort_key)
+                ) WITHOUT ROWID
+                """
+            )
+            conn.execute(
+                "INSERT INTO screen_rows (generation, view, sort_key, posting_id, kept, "
+                "level, level_source, eligibility_checked, sponsorship) "
+                "VALUES ('gen-0', ?, ?, ?, 1, 'entry', 'title', 1, 'unstated')",
+                (VIEW_KEPT, kept_row(1).sort_key, post(1).id),
+            )
+
+    def test_a_view_written_before_the_column_serves_as_null_instead_of_raising(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "postings.db"
+        self._pre_change_file(path)
+
+        store = SqlitePostingStore(path)
+        [stored] = store.screened_page(VIEW_KEPT, generation="gen-0", limit=10).rows
+        assert stored.posting_id == post(1).id
+        assert stored.first_seen is None, "not recorded, and that is a fact not an error"
+        store.close()
+
+    def test_the_next_pass_republishes_the_same_view_with_the_stamp(
+        self, tmp_path: Path
+    ) -> None:
+        """The whole compatibility story is "one stale day", so the second day matters
+        as much as the first: nothing has to be backfilled because the cron rebuilds the
+        view every morning from a corpus that has always had the column.
+        """
+        path = tmp_path / "postings.db"
+        self._pre_change_file(path)
+
+        store = SqlitePostingStore(path)
+        store.sync([post(1)], now=DAY1)
+        store.save_screening([kept_row(1)], summary=summary("gen-1", kept=1))
+        [stored] = store.screened_page(VIEW_KEPT, generation="gen-1", limit=10).rows
+        assert stored.first_seen == DAY1
+        store.close()
+
+    def test_opening_the_file_twice_does_not_add_the_column_again(
+        self, tmp_path: Path
+    ) -> None:
+        """``ALTER TABLE ADD COLUMN`` is an error, not a no-op, on a column that is
+        already there — so a migration that is not guarded takes every warm start down.
+        """
+        path = tmp_path / "postings.db"
+        self._pre_change_file(path)
+
+        SqlitePostingStore(path).close()
+        store = SqlitePostingStore(path)
+        columns = [
+            str(row["name"]) for row in store._conn.execute("PRAGMA table_info(screen_rows)")
+        ]
+        assert columns.count("first_seen") == 1
+        store.close()
