@@ -250,7 +250,7 @@ def make(
     desc: str = JD_BACKEND,
     has_desc: bool | None = None,
     day: int = 1,
-    posted_at: datetime | None | str = "auto",
+    posted_at: datetime | str | None = "auto",
     url: str | None = None,
     employment_type: str = "",
 ) -> Posting:

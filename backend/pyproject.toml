@@ -24,8 +24,13 @@ adapters = [
 ]
 dev = [
   "pytest>=8.2",
-  "ruff>=0.5",
-  "mypy>=1.10",
+  # Pinned exactly, not `>=`. CI installs from this file and ran a *newer* ruff
+  # than the local venv, so `ruff check` passed locally and failed on the PR with
+  # RUF036 — a rule the local build did not have. A lint gate that disagrees with
+  # itself across machines is not a gate; it is a coin flip you notice in review.
+  # Bump these deliberately and fix the fallout in that commit.
+  "ruff==0.16.1",
+  "mypy==2.3.0",
 ]
 
 [tool.setuptools.packages.find]
