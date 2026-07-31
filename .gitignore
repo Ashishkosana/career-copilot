@@ -55,3 +55,6 @@ infra/cdk.out/
 
 # --- OS -----------------------------------------------------------------
 .DS_Store
+
+# generated UI build (embeds full posting prose — never commit)
+build/

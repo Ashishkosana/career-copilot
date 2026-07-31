@@ -1,13 +1,17 @@
-name: backend-ci
+name: ci
 
+# `infra/**` is in the trigger paths because the CDK stack is the other half of the
+# product. It used to bundle the v1 package and point every handler string and every
+# env var at names v2 does not use, and no CI job would have noticed: the trigger was
+# `backend/**` only, so a stack that could not work never ran a single check.
 on:
   push:
-    paths: ["backend/**", ".github/workflows/ci.yml"]
+    paths: ["backend/**", "infra/**", ".github/workflows/ci.yml"]
   pull_request:
-    paths: ["backend/**", ".github/workflows/ci.yml"]
+    paths: ["backend/**", "infra/**", ".github/workflows/ci.yml"]
 
 jobs:
-  quality:
+  backend:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -19,9 +23,137 @@ jobs:
           python-version: "3.13"
       - name: Install
         run: pip install -e ".[dev,adapters]"  # adapters extra (boto3/google) — CI tests the adapter layer
+      # `scripts` is included: tailor.py had three strict errors, one of them a
+      # `dict[str, object]` of source classes whose `.fetch()` call was unchecked.
       - name: Lint (ruff)
-        run: ruff check src tests
+        run: ruff check src tests scripts ../tools
+      # No path argument. `files = ["src", "tests", "scripts"]` in pyproject.toml is
+      # the single definition of the gate, so CI and a local `mypy` cannot disagree.
+      # This used to be `mypy src/copilot`, which passed while `tests/` carried 37
+      # strict errors — including a test double that did not satisfy the port it
+      # doubled, i.e. exactly the error types are bought for.
       - name: Types (mypy, strict)
-        run: mypy src/copilot
+        run: mypy
       - name: Tests (pytest)
         run: pytest
+
+  infra:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install
+        run: npm ci
+      - name: Types (tsc)
+        run: npx tsc --noEmit
+      # Synth needs the Lambda asset to exist, and the stack deliberately refuses
+      # to synth without the v2 package in it — that refusal is what stops a stale
+      # `infra/build/` (gitignored, so whatever a previous run left behind) from
+      # being what deploys. Python 3.13 is set up for the build script, which reads
+      # the dependency list out of backend/pyproject.toml with tomllib.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build the Lambda asset
+        run: ./build-lambda.sh
+      # Placeholder context: the stack throws at synth on a blank myEmail or
+      # ownerUserId, because a blank means "do not email me" and "store the briefing
+      # under a user id no authenticated read can match" — both silent.
+      - name: Synth both stacks
+        run: npx cdk synth -c myEmail=ci@example.invalid -c ownerUserId=ci-placeholder
+      - name: No Scan, no stream reads, no cross-stack exports
+        run: |
+          set -euo pipefail
+          for f in cdk.out/career-copilot.template.json \
+                   cdk.out/career-copilot-monitoring.template.json; do
+            ! grep -q 'dynamodb:Scan' "$f" || { echo "$f grants Scan"; exit 1; }
+            ! grep -q 'dynamodb:GetRecords' "$f" || { echo "$f grants stream reads"; exit 1; }
+            ! grep -q 'ExportsOutput' "$f" || { echo "$f exports a value"; exit 1; }
+            ! grep -q 'Fn::ImportValue' "$f" || { echo "$f imports a value"; exit 1; }
+          done
+          echo "template invariants hold"
+      # The stack already guards these at synth time. They are repeated here because
+      # the synth guards live in the same file as the routes they check, so one commit
+      # can relax both, and because this is the one unauthenticated surface in the
+      # system: it is worth a check that a change to career-copilot-stack.ts cannot
+      # also edit. Asserted over the *synthesized* template, not the TypeScript,
+      # because what deploys is the template.
+      - name: The public route stays unauthenticated, read-only and throttled
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, sys
+          t = json.load(open("cdk.out/career-copilot.template.json"))
+          res = t["Resources"]
+          methods = {k: v["Properties"] for k, v in res.items()
+                     if v["Type"] == "AWS::ApiGateway::Method"}
+          fail = []
+
+          # 1. Every non-OPTIONS method with no authorizer is a GET under /public.
+          #    OPTIONS are CORS MOCK integrations and carry no integration to a Lambda.
+          for name, p in methods.items():
+              if p.get("AuthorizationType") != "NONE" or p["HttpMethod"] == "OPTIONS":
+                  continue
+              if p["HttpMethod"] != "GET":
+                  fail.append(f"{name}: unauthenticated {p['HttpMethod']}, only GET may be open")
+              if "public" not in name.lower():
+                  fail.append(f"{name}: unauthenticated and not under /public")
+
+          # 2. Nothing that was behind Cognito quietly stopped being.
+          protected = sum(1 for p in methods.values()
+                          if p.get("AuthorizationType") == "COGNITO_USER_POOLS")
+          if protected != 6:
+              fail.append(f"expected 6 Cognito-protected methods, found {protected}")
+
+          # 3. The public function's IAM policy contains no write and no credential
+          #    read. `POST /applied` must be unreachable from it in IAM, not only in
+          #    the router — a router is one edit from wrong, a policy is a boundary.
+          FORBIDDEN = ("PutItem", "UpdateItem", "DeleteItem", "BatchWrite", "Scan",
+                       "ssm:", "secretsmanager:", "kms:")
+          for name, v in res.items():
+              if v["Type"] != "AWS::IAM::Policy" or "Public" not in name:
+                  continue
+              doc = json.dumps(v["Properties"]["PolicyDocument"])
+              for bad in FORBIDDEN:
+                  if bad in doc:
+                      fail.append(f"{name} grants {bad}")
+
+          # 4. Every open method is rate limited, and the stage has a default ceiling.
+          #    An unthrottled open endpoint inherits the account default of 10,000
+          #    req/s, which is a bill rather than an outage and so is not self-limiting.
+          stage = next(v["Properties"] for v in res.values()
+                       if v["Type"] == "AWS::ApiGateway::Stage")
+          settings = stage.get("MethodSettings", [])
+          throttled = {s["ResourcePath"] for s in settings
+                       if s.get("ThrottlingRateLimit") is not None}
+          if not any(s["ResourcePath"] == "/*" for s in settings):
+              fail.append("the stage has no default throttle")
+          for name, p in methods.items():
+              if p.get("AuthorizationType") != "NONE" or p["HttpMethod"] == "OPTIONS":
+                  continue
+              if not any(path.startswith("/~1public") for path in throttled):
+                  fail.append(f"{name}: no /public throttle in MethodSettings")
+                  break
+
+          # 5. Reserved concurrency on the public function bounds the cost the rate
+          #    limit cannot: requests that get slow rather than frequent.
+          public_fns = [v["Properties"] for k, v in res.items()
+                        if v["Type"] == "AWS::Lambda::Function"
+                        and v["Properties"].get("Handler", "").endswith("public_api.handler")]
+          if len(public_fns) != 1:
+              fail.append(f"expected exactly 1 public function, found {len(public_fns)}")
+          for p in public_fns:
+              if not p.get("ReservedConcurrentExecutions"):
+                  fail.append("the public function has no reserved concurrency")
+
+          if fail:
+              print("\n".join(f"FAIL: {f}" for f in fail))
+              sys.exit(1)
+          print("public route invariants hold: open GETs only under /public, "
+                "no write or credential grant, throttled, concurrency bounded")
+          PY

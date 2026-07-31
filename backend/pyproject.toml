@@ -15,6 +15,7 @@ dependencies = [
 [project.optional-dependencies]
 # Cloud/Google adapters — only imported by the adapter layer, never the domain.
 adapters = [
+  "anthropic>=0.40",
   "boto3>=1.34",
   "google-api-python-client>=2.130",
   "google-auth>=2.30",
@@ -56,6 +57,13 @@ python_version = "3.13"
 strict = true
 mypy_path = "src"
 plugins = ["pydantic.mypy"]
+# The gate is `mypy src tests scripts`, not `mypy src`. Checking only the package
+# left 37 strict errors in the test suite, and two of them were real: a `FakeStore`
+# that did not satisfy `StorePort` (so it proved less than it looked like it did),
+# and an attack list typed `object` whose callables were never checked at the call
+# site. A test double that does not type-check against the port it doubles is the
+# one place a type error costs you the thing types were bought for.
+files = ["src", "tests", "scripts"]
 
 # Cloud/Google SDKs ship no (complete) type stubs; the adapter layer imports them
 # lazily and keeps their return values behind typed boundaries.
