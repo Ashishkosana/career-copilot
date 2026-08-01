@@ -104,11 +104,29 @@ jobs:
       # ~20-40 postings needing a level. A manual run passes its own, up to 1,000.
       LIMIT: ${{ inputs.limit || '150' }}
       CHUNK: ${{ inputs.chunk || '25' }}
-      # One directory holds round-NN.json / .prompt.txt / .raw.txt. Under RUNNER_TEMP
-      # because the model step must not be able to see the checkout.
-      LEVELS_DIR: ${{ runner.temp }}/levels
+      # LEVELS_DIR is deliberately NOT here — see the "Choose the batch directory" step.
     steps:
       - uses: actions/checkout@v4
+
+      # One directory holds every round's .json / .prompt.txt / .raw.txt, under
+      # RUNNER_TEMP so the model step cannot see the checkout.
+      #
+      # Set through $GITHUB_ENV rather than in the job's `env:` block, and both of the
+      # obvious shortcuts are wrong there. `${{ runner.temp }}` is rejected outright —
+      # the `runner` context exists only inside steps, and GitHub answers
+      # "Unrecognized named-value: 'runner'" by refusing to parse the whole file.
+      # `$RUNNER_TEMP` is worse, because it is accepted: job-level `env` values are
+      # literal, so LEVELS_DIR would hold the eleven characters `$RUNNER_TEMP` and every
+      # later `"$LEVELS_DIR"` would expand to a path with a dollar sign in it. Bash
+      # expands this line, so the variable holds a real path.
+      #
+      # Worth knowing how the first mistake presents: an unparseable workflow does not
+      # report a syntax error anywhere obvious. It creates a run with **zero jobs**,
+      # marks it failed, and shows the file path where the workflow name belongs — so it
+      # reads as a failing run rather than a broken file, and `gh workflow run` cannot
+      # even find it by name. `gh workflow run levels.yml` prints the real message.
+      - name: Choose the batch directory
+        run: echo "LEVELS_DIR=$RUNNER_TEMP/levels" >> "$GITHUB_ENV"
 
       - uses: actions/setup-python@v5
         with:
