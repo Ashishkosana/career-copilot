@@ -339,7 +339,16 @@ def score_report(report: GapReport, *, level_confirmed: bool) -> Score:
 
     if req_total >= MIN_EVIDENCE_FOR_EXACT and req_ratio == 1.0 and level_confirmed:
         tier = Tier.EXACT
-    elif req_ratio >= _STRONG_AT:
+    # The same evidence floor has to guard STRONG, not only EXACT. It did not, and
+    # the hole was visible on the live worklist 2026-08-26: a Bangalore "ServiceNow
+    # Developer" naming exactly two requirements (REST, unit testing) covered 2/2,
+    # took req_ratio 1.0, and ranked STRONG above a clera role covering 8 of 10.
+    # `total` was already honest — evidence_factor pulled that posting to 40 — so the
+    # number and the band disagreed, and anything reading the band got the wrong
+    # answer. A ratio over two items is not strong evidence of anything, so it falls
+    # through to PARTIAL, which is what full coverage of a barely-specified posting
+    # actually means.
+    elif req_ratio >= _STRONG_AT and req_total >= MIN_EVIDENCE_FOR_EXACT:
         tier = Tier.STRONG
     elif req_ratio >= _PARTIAL_AT:
         tier = Tier.PARTIAL

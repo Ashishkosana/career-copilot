@@ -89,6 +89,53 @@ _INTERNSHIP_TYPES = frozenset({"intern", "internship", "co-op", "coop", "apprent
 #: Sorts undated postings last without dropping them.
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
+#: Countries and cities that positively mean "not in the US". Measured 2026-08-26:
+#: 52 of 250 live worklist rows (21%) were Bangalore, London, Munich, Berlin,
+#: Kraków, Warsaw or "Home based - Worldwide", and 22 of those ranked STRONG. On
+#: F-1 OPT a role outside the US is not a weaker match, it is unusable — the same
+#: reason clearance and citizenship are gates rather than score penalties.
+#:
+#: This fires ONLY on a positive non-US match, never on the absence of a US marker.
+#: The first draft of this check inverted it — "flag anything without a US state
+#: code" — and read "Clifton Park, New York" and "San Francisco" as foreign, which
+#: would have excluded 155 rows instead of 52. A false negative here hides a real
+#: job; a false positive only leaves one row to skim.
+_OUTSIDE_US = re.compile(
+    r"""\b(
+        india | bangalore | bengaluru | hyderabad | pune | mumbai | delhi | chennai
+      | noida | gurgaon | gurugram | kolkata | ahmedabad
+      | london | united\s+kingdom | england | scotland | wales | manchester
+      | ireland | dublin | belfast
+      | germany | berlin | munich | münchen | hamburg | frankfurt
+      | france | paris | netherlands | amsterdam | utrecht
+      | spain | madrid | barcelona | portugal | lisbon | porto
+      | poland | warsaw | warszawa | krakow | kraków | wroclaw | wrocław
+      | italy | rome | milan | greece | athens | romania | bucharest
+      | czech | prague | hungary | budapest | austria | vienna
+      | sweden | stockholm | denmark | copenhagen | norway | oslo | finland | helsinki
+      | switzerland | zurich | zürich | geneva | belgium | brussels
+      | canada | toronto | vancouver | montreal | montréal | ottawa | waterloo,\s*on
+      | australia | sydney | melbourne | brisbane | new\s+zealand | auckland
+      | singapore | japan | tokyo | osaka | korea | seoul
+      | china | shanghai | beijing | shenzhen | hong\s+kong | taiwan | taipei
+      | israel | tel\s+aviv | haifa | united\s+arab\s+emirates | dubai | abu\s+dhabi
+      | brazil | são\s+paulo | sao\s+paulo | argentina | buenos\s+aires
+      | mexico\s+city | colombia | bogot[áa] | chile | santiago
+      | worldwide | emea | apac | latam | anywhere\s+in\s+europe
+    )\b""",
+    re.I | re.X,
+)
+
+
+def is_outside_us(location: str) -> bool:
+    """True only when the location positively names somewhere outside the US.
+
+    A blank or ambiguous location is NOT outside the US. Roughly a third of
+    postings carry a bare city with no country, and treating those as foreign
+    would drop more real jobs than it saves reading time.
+    """
+    return bool(location) and bool(_OUTSIDE_US.search(location))
+
 
 class Exclusion(StrEnum):
     """Why a posting was removed. Ordered by the gate that caught it."""
@@ -100,6 +147,7 @@ class Exclusion(StrEnum):
     CLEARANCE = "security_clearance_required"
     CITIZENSHIP = "citizenship_or_itar_restricted"
     NO_SPONSORSHIP = "employer_will_not_sponsor"
+    OUTSIDE_US = "outside_the_us"
 
 
 @dataclass(frozen=True)
@@ -136,6 +184,9 @@ class ScreenDecision:
             Exclusion.CITIZENSHIP: f"citizenship/ITAR — {quoted.get('citizenship', '')!r}",
             Exclusion.NO_SPONSORSHIP: (
                 f"will not sponsor — {quoted.get('no_sponsorship', '')!r}"
+            ),
+            Exclusion.OUTSIDE_US: (
+                f"located outside the US — {self.posting.location!r}"
             ),
         }
         return reasons.get(exclusion, exclusion.value)
@@ -217,6 +268,14 @@ def screen(
 
     if not include_internships and is_internship(posting.title, posting.employment_type):
         exclusions.append(Exclusion.INTERNSHIP)
+
+    # A string test on one field, so it belongs up here with the cheap gates. This
+    # is a gate and not a score penalty for the same reason CLEARANCE is: on F-1
+    # OPT a Bangalore or London posting is not a worse match, it is one he cannot
+    # take. It went missing until 2026-08-26, when 21% of the live worklist turned
+    # out to be non-US and 22 of those were ranked STRONG.
+    if is_outside_us(posting.location):
+        exclusions.append(Exclusion.OUTSIDE_US)
 
     verdict = decide_level(
         posting.title, posting.description, desc_available=posting.desc_available

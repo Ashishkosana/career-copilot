@@ -12,7 +12,13 @@ import pytest
 
 from copilot.domain.eligibility import Sponsorship, screen_eligibility
 from copilot.domain.posting import Posting
-from copilot.domain.screening import Exclusion, is_software_role, screen, screen_all
+from copilot.domain.screening import (
+    Exclusion,
+    is_outside_us,
+    is_software_role,
+    screen,
+    screen_all,
+)
 from copilot.domain.seniority import (
     JUNIOR_BANDS,
     Level,
@@ -550,3 +556,44 @@ class TestCitizenshipRecallGap:
         result = screen_eligibility("", desc_available=False)
         assert result.checked is False
         assert result.citizenship_required is False
+
+
+class TestOutsideUS:
+    """The country gate. Added 2026-08-26 after 52 of 250 live worklist rows (21%)
+    turned out to be Bangalore, London, Munich, Krakow or "Worldwide", 22 of them
+    ranked STRONG. On F-1 OPT those are unusable, not merely weaker."""
+
+    @pytest.mark.parametrize(
+        "location",
+        [
+            "Bangalore, India",
+            "London",
+            "Munich",
+            "Berlin",
+            "PL-Warsaw-Lixa C",
+            "Home based - Worldwide",
+            "Toronto, Canada",
+            "Kraków",
+        ],
+    )
+    def test_positively_foreign_is_excluded(self, location: str) -> None:
+        assert is_outside_us(location)
+
+    @pytest.mark.parametrize(
+        "location",
+        [
+            # The first draft inverted this check and read all four as foreign,
+            # because none carries a state code or the words "United States".
+            "Clifton Park, New York",
+            "San Francisco",
+            "Raleigh-Cary, NC, Austin/Dallas, TX, Tampa Bay, FL",
+            "Boston, Massachusetts, United States",
+            "Tempe, Arizona, United States",
+            "Remote",
+            "",
+        ],
+    )
+    def test_us_and_ambiguous_are_kept(self, location: str) -> None:
+        """Absence of a US marker is not evidence of being abroad. A false negative
+        hides a real job; a false positive costs one row of skimming."""
+        assert not is_outside_us(location)
