@@ -61,3 +61,6 @@ build/
 
 # tooling scratch
 .serena/
+
+# H-1B disclosure CSVs: bulk public data, re-downloadable per data/h1b/SOURCE.md
+data/h1b/*.csv
