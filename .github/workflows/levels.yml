@@ -64,10 +64,14 @@
 name: levels
 
 on:
-  schedule:
-    # 15:00 UTC = 08:00 America/Phoenix, an hour after the fetch cron at 14:00, so the
-    # postings this reads about already exist.
-    - cron: "0 15 * * *"
+  # Schedule is off: repo AWS secrets are invalid/expired
+  # (`UnrecognizedClientException: The security token included in the request is invalid`).
+  # The daily cron was failing on "Export the postings that still need a level".
+  # After rotating AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY, re-enable the cron below.
+  # schedule:
+  #   # 15:00 UTC = 08:00 America/Phoenix, an hour after the fetch cron at 14:00, so the
+  #   # postings this reads about already exist.
+  #   - cron: "0 15 * * *"
   workflow_dispatch:
     # The 2,207-posting backlog is a one-time catch-up, so the manual default is the
     # big one: 500 postings, 20 rounds, ~15 min end to end. Five of these drain it.
