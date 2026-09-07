@@ -235,7 +235,7 @@ jobs:
       # green run leaves nothing behind.
       - name: Upload the batch for inspection
         if: failure() && steps.check.outputs.rounds != '0'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: level-batch
           path: ${{ runner.temp }}/levels
