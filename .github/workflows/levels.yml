@@ -110,7 +110,7 @@ jobs:
       CHUNK: ${{ inputs.chunk || '25' }}
       # LEVELS_DIR is deliberately NOT here — see the "Choose the batch directory" step.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # One directory holds every round's .json / .prompt.txt / .raw.txt, under
       # RUNNER_TEMP so the model step cannot see the checkout.
