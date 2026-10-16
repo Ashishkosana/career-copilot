@@ -22,7 +22,7 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Install
@@ -68,7 +68,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       # The generator imports the backend package, so it needs the backend's deps —
@@ -135,7 +135,7 @@ jobs:
       # `infra/build/` (gitignored, so whatever a previous run left behind) from
       # being what deploys. Python 3.13 is set up for the build script, which reads
       # the dependency list out of backend/pyproject.toml with tomllib.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
       - name: Build the Lambda asset

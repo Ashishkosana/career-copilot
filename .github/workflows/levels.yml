@@ -132,7 +132,7 @@ jobs:
       - name: Choose the batch directory
         run: echo "LEVELS_DIR=$RUNNER_TEMP/levels" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
