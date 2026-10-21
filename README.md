@@ -58,7 +58,7 @@ EventBridge daily ──▶ Lambda: fetch 819 boards → screen → sync → clo
 ```
 
 - `backend/src/copilot/` — the v2 package: `domain/`, `ports/`, `adapters/`,
-  `handlers/`, `services/`. 498 tests, ruff clean, `mypy --strict` clean.
+  `handlers/`, `services/`. 910 tests, ruff clean, `mypy --strict` clean.
 - `backend/src/copilot/adapters/ats/` — the five ATS readers plus the watchlist
   fan-out, which bounds concurrency and contains a dead board rather than raising.
 - `infra/` — CDK: two stacks, the postings table with four named-access-pattern
@@ -72,7 +72,7 @@ EventBridge daily ──▶ Lambda: fetch 819 boards → screen → sync → clo
 python3.13 -m venv backend/.venv
 backend/.venv/bin/pip install -e 'backend[dev,adapters]'
 
-cd backend && .venv/bin/python -m pytest        # 498 tests, all offline
+cd backend && .venv/bin/python -m pytest        # 910 tests, all offline
 cd .. && ./scripts/run-local.sh                # the real pipeline against public boards
 ```
 
